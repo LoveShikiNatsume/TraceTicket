@@ -9,6 +9,10 @@ class Config:
     JAEGER_PORT = 31686
     REQUEST_TIMEOUT = 30
     
+    # 采集配置
+    DEFAULT_COLLECTION_INTERVAL = 60  # 默认采集间隔（秒）- 改为1分钟
+    LOOKBACK_PERIOD = "5m"           # 回看时间窗口
+    
     SCRIPT_DIR = Path(__file__).resolve().parent
     PROJECT_ROOT = SCRIPT_DIR.parent
     OUTPUT_DIR = str(PROJECT_ROOT / "trace_output")

@@ -19,7 +19,7 @@ from datetime import datetime
 import networkx as nx
 
 class TraceGraphPostProcessor:
-    """调用链图后处理器 - 扩展现有12列数据为14列"""
+    """调用链图后处理器 - 直接扩展原有CSV文件为14列"""
     
     def __init__(self, data_dir: str = "trace_output", use_dynamic_thresholds: bool = True):
         self.data_dir = data_dir
@@ -55,7 +55,7 @@ class TraceGraphPostProcessor:
         self.logger.info("图后处理器已初始化")
         self.logger.info(f"数据目录: {data_dir}")
         self.logger.info(f"动态阈值: {'启用' if use_dynamic_thresholds else '禁用'}")
-        self.logger.info("将12列数据扩展为14列（添加图分析特征）")
+        self.logger.info("将直接在原CSV文件上添加图分析特征列")
 
     def _setup_logging(self):
         """设置日志"""
@@ -436,7 +436,7 @@ class TraceGraphPostProcessor:
         return updated_spans
 
     def save_enhanced_csv(self, spans_data: List[Dict], output_path: str):
-        """保存扩展后的14列CSV文件"""
+        """直接更新原CSV文件，添加图分析列"""
         if not spans_data:
             return
         
@@ -448,6 +448,12 @@ class TraceGraphPostProcessor:
             "graphLatencyLabel", "graphStructureLabel"  # 新增字段
         ]
         
+        # 备份原文件
+        backup_path = output_path + ".backup"
+        if os.path.exists(output_path):
+            import shutil
+            shutil.copy2(output_path, backup_path)
+        
         with open(output_path, 'w', newline='', encoding='utf-8-sig') as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
@@ -455,6 +461,8 @@ class TraceGraphPostProcessor:
             for span in spans_data:
                 row = {field: span.get(field, 0) for field in fieldnames}
                 writer.writerow(row)
+        
+        self.logger.debug(f"已更新CSV文件: {os.path.basename(output_path)}")
 
     def process_date_directory(self, date_dir: str) -> bool:
         """处理某个日期目录的所有数据"""
@@ -464,6 +472,12 @@ class TraceGraphPostProcessor:
             self.logger.warning(f"CSV 目录不存在: {csv_dir}")
             return False
         
+        # 检查是否已经处理过
+        processed_flag = os.path.join(date_dir, ".graph_processed")
+        if os.path.exists(processed_flag):
+            self.logger.info(f"目录 {os.path.basename(date_dir)} 已完成图分析处理，跳过")
+            return True
+        
         # 加载映射数据
         mapping_data = self.load_mapping_data(date_dir)
         
@@ -471,10 +485,6 @@ class TraceGraphPostProcessor:
         if not csv_files:
             self.logger.warning(f"未找到 CSV 文件: {csv_dir}")
             return False
-        
-        # 创建enhanced目录存放14列文件
-        enhanced_dir = os.path.join(date_dir, "csv_enhanced")
-        os.makedirs(enhanced_dir, exist_ok=True)
         
         total_files = len(csv_files)
         self.logger.info(f"开始处理 {total_files} 个CSV文件...")
@@ -517,7 +527,6 @@ class TraceGraphPostProcessor:
                 "latency_values": [],
                 "complexity_values": []
             }
-        
         # 处理所有文件
         for csv_file in sorted(csv_files):
             try:
@@ -531,9 +540,8 @@ class TraceGraphPostProcessor:
                 # 进行图分析，添加图特征
                 enhanced_spans = self.analyze_batch_data(spans_data, mapping_data)
                 
-                # 保存14列CSV文件
-                enhanced_path = os.path.join(enhanced_dir, csv_file)
-                self.save_enhanced_csv(enhanced_spans, enhanced_path)
+                # 直接更新原CSV文件
+                self.save_enhanced_csv(enhanced_spans, csv_path)
                 
                 processed_count += 1
                 enhanced_count += len(enhanced_spans)
@@ -548,10 +556,30 @@ class TraceGraphPostProcessor:
         # 输出详细统计信息
         self._print_analysis_stats(date_dir)
         
+        # 创建处理完成标志文件
+        self._create_processing_flags(date_dir)
+        
         self.logger.info(f"完成处理: {processed_count}/{total_files} 个文件")
         self.logger.info(f"增强了 {enhanced_count} 条span记录")
-        self.logger.info(f"14列CSV文件保存在: {enhanced_dir}")
+        self.logger.info(f"原CSV文件已更新为14列格式")
         return processed_count > 0
+
+    def _create_processing_flags(self, date_dir: str):
+        """创建处理完成标志文件"""
+        # 图分析处理完成标志
+        graph_flag = os.path.join(date_dir, ".graph_processed")
+        with open(graph_flag, 'w', encoding='utf-8') as f:
+            f.write(f"Graph analysis completed at: {datetime.now().isoformat()}\n")
+            f.write(f"CSV files enhanced to 14 columns with graph features\n")
+        
+        # VAE就绪标志
+        vae_flag = os.path.join(date_dir, ".vae_ready")
+        with open(vae_flag, 'w', encoding='utf-8') as f:
+            f.write(f"Data ready for VAE input at: {datetime.now().isoformat()}\n")
+            f.write(f"14-column CSV files with graph analysis features\n")
+            f.write(f"Total traces processed: {self.analysis_stats['total_traces']}\n")
+        
+        self.logger.info("✅ 已创建处理完成标志: .graph_processed, .vae_ready")
 
     def _print_analysis_stats(self, date_dir: str):
         """输出分析统计信息"""
@@ -648,7 +676,7 @@ def main():
     import argparse
     
     parser = argparse.ArgumentParser(
-        description="Train Ticket 调用链图后处理器 - 扩展12列为14列",
+        description="Train Ticket 调用链图后处理器 - 直接增强原CSV为14列",
         epilog="""
 使用示例:
   python graph_post_processor.py                     # 处理所有日期（动态阈值）
@@ -657,8 +685,8 @@ def main():
   python graph_post_processor.py --data-dir ./traces # 指定数据目录
   
 输出说明:
-  原始12列文件: trace_output/YYYY-MM-DD/csv/
-  增强14列文件: trace_output/YYYY-MM-DD/csv_enhanced/
+  原始12列文件将被直接更新为14列文件
+  处理完成后会创建 .graph_processed 和 .vae_ready 标志文件
   分析统计: trace_output/YYYY-MM-DD/graph_analysis_stats.json
         """,
         formatter_class=argparse.RawDescriptionHelpFormatter

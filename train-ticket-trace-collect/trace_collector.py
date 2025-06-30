@@ -412,8 +412,12 @@ class AnomalyDetectionTraceCollector:
                 row = {field: span.get(field, 0) for field in fieldnames}
                 writer.writerow(row)
 
-    def start_collection(self, duration_minutes: int = 60, interval_seconds: int = 30) -> bool:
+    def start_collection(self, duration_minutes: int = 60, interval_seconds: int = None) -> bool:
         """开始链路追踪数据采集 - 支持跨日期运行"""
+        # 使用配置文件中的默认间隔
+        if interval_seconds is None:
+            interval_seconds = self.config.DEFAULT_COLLECTION_INTERVAL
+            
         self.logger.info("开始 Train Ticket 链路追踪数据采集")
         
         if not self.test_connection():
@@ -432,7 +436,7 @@ class AnomalyDetectionTraceCollector:
             self.logger.info(f"将从 {len(services)} 个服务采集数据，持续 {duration_minutes} 分钟")
             end_time = time.time() + (duration_minutes * 60)
         
-        self.logger.info(f"采集间隔: {interval_seconds} 秒")
+        self.logger.info(f"采集间隔: {interval_seconds} 秒 ({'分钟级采集' if interval_seconds == 60 else '自定义间隔'})")
         
         self.stats["start_time"] = datetime.now().isoformat()
         start_time = time.time()
@@ -539,8 +543,8 @@ def main():
     )
     parser.add_argument("--duration", type=int, default=30, 
                        help="采集持续时间（分钟），0=持续运行，默认: 30")
-    parser.add_argument("--interval", type=int, default=30, 
-                       help="采集间隔（秒），默认: 30")
+    parser.add_argument("--interval", type=int, default=None, 
+                       help=f"采集间隔（秒），默认: {Config().DEFAULT_COLLECTION_INTERVAL}")
     parser.add_argument("--test", action="store_true", 
                        help="仅测试连接")
     
