@@ -63,13 +63,12 @@ class AnomalyDetectionTraceCollector:
         today = datetime.now().strftime("%Y-%m-%d")
         today_dir = os.path.join(self.base_output_dir, today)
         csv_dir = os.path.join(today_dir, "csv")
-        json_dir = os.path.join(today_dir, "json")
+        # 移除json_dir，不再生成JSON文件夹
         
         # 确保目录存在
         os.makedirs(csv_dir, exist_ok=True)
-        os.makedirs(json_dir, exist_ok=True)
         
-        return today, today_dir, csv_dir, json_dir
+        return today, today_dir, csv_dir
 
     def _setup_logging(self):
         """设置日志输出"""
@@ -350,33 +349,13 @@ class AnomalyDetectionTraceCollector:
             return
         
         # 🔥 关键修复：每次保存时重新获取当前日期目录
-        today, today_dir, csv_dir, json_dir = self._get_current_date_dirs()
+        today, today_dir, csv_dir = self._get_current_date_dirs()
         
         time_part = timestamp.split("T")[1]
         hour_minute = time_part.split(":")[0] + "_" + time_part.split(":")[1]
         filename = hour_minute
         
-        # 保存 JSON
-        json_data = {
-            "spans": data,
-            "operation_mapping": self.operation_encoder,
-            "service_mapping": self.service_encoder,
-            "collection_info": {
-                "timestamp": timestamp,
-                "total_spans": len(data),
-                "unique_operations": len(self.operation_encoder),
-                "unique_services": len(self.service_encoder),
-                "error_spans": len([s for s in data if s.get("_has_error", False)]),
-                "spans_with_parent": len([s for s in data if s.get("parentSpanId", 0) > 0]),
-                "spans_with_db_hash": len([s for s in data if s.get("DBhash", 0) > 0])
-            }
-        }
-        
-        json_file = os.path.join(json_dir, f"{filename}.json")
-        with open(json_file, 'w', encoding='utf-8') as f:
-            json.dump(json_data, f, indent=2, ensure_ascii=False)
-        
-        # 保存 CSV
+        # 只保存 CSV，移除JSON保存
         csv_file = os.path.join(csv_dir, f"{filename}.csv")
         self._save_csv(data, csv_file)
         

@@ -21,7 +21,7 @@ import networkx as nx
 class TraceGraphPostProcessor:
     """调用链图后处理器 - 直接扩展原有CSV文件为14列"""
     
-    def __init__(self, data_dir: str = "trace_output", use_dynamic_thresholds: bool = True):
+    def __init__(self, data_dir: str = "trace", use_dynamic_thresholds: bool = True):
         self.data_dir = data_dir
         self.use_dynamic_thresholds = use_dynamic_thresholds
         self.logger = self._setup_logging()
@@ -464,6 +464,47 @@ class TraceGraphPostProcessor:
         
         self.logger.debug(f"已更新CSV文件: {os.path.basename(output_path)}")
 
+    def process_single_csv_file(self, csv_path: str, mapping_data: Dict) -> bool:
+        """处理单个CSV文件并创建对应的处理标志"""
+        try:
+            # 检查是否已经处理过
+            processed_flag = csv_path.replace('.csv', '.graph_processed')
+            if os.path.exists(processed_flag):
+                self.logger.debug(f"文件 {os.path.basename(csv_path)} 已处理，跳过")
+                return True
+            
+            # 加载12列数据
+            spans_data = self.load_csv_data(csv_path)
+            if not spans_data:
+                return False
+            
+            # 进行图分析，添加图特征
+            enhanced_spans = self.analyze_batch_data(spans_data, mapping_data)
+            
+            # 直接更新原CSV文件
+            self.save_enhanced_csv(enhanced_spans, csv_path)
+            
+            # 为这个CSV文件创建处理完成标志
+            self._create_file_processing_flag(csv_path)
+            
+            self.logger.info(f"✅ 已处理文件: {os.path.basename(csv_path)}")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"处理文件 {csv_path} 失败: {e}")
+            return False
+
+    def _create_file_processing_flag(self, csv_path: str):
+        """为单个CSV文件创建处理完成标志"""
+        flag_file = csv_path.replace('.csv', '.graph_processed')
+        
+        with open(flag_file, 'w', encoding='utf-8') as f:
+            f.write(f"Graph analysis completed at: {datetime.now().isoformat()}\n")
+            f.write(f"CSV file enhanced to 14 columns with graph features\n")
+            f.write(f"Ready for anomaly detection\n")
+        
+        self.logger.debug(f"已创建处理标志: {os.path.basename(flag_file)}")
+
     def process_date_directory(self, date_dir: str) -> bool:
         """处理某个日期目录的所有数据"""
         csv_dir = os.path.join(date_dir, "csv")
@@ -471,12 +512,6 @@ class TraceGraphPostProcessor:
         if not os.path.exists(csv_dir):
             self.logger.warning(f"CSV 目录不存在: {csv_dir}")
             return False
-        
-        # 检查是否已经处理过
-        processed_flag = os.path.join(date_dir, ".graph_processed")
-        if os.path.exists(processed_flag):
-            self.logger.info(f"目录 {os.path.basename(date_dir)} 已完成图分析处理，跳过")
-            return True
         
         # 加载映射数据
         mapping_data = self.load_mapping_data(date_dir)
@@ -503,7 +538,7 @@ class TraceGraphPostProcessor:
         
         # 如果使用动态阈值，先处理部分文件收集数据
         if self.use_dynamic_thresholds and total_files > 5:
-            sample_count = min(5, total_files // 3)  # 使用1/3的文件作为样本
+            sample_count = min(5, total_files // 3)
             self.logger.info(f"动态阈值模式：先处理 {sample_count} 个样本文件...")
             
             for i, csv_file in enumerate(sorted(csv_files)[:sample_count]):
@@ -527,150 +562,49 @@ class TraceGraphPostProcessor:
                 "latency_values": [],
                 "complexity_values": []
             }
+        
         # 处理所有文件
         for csv_file in sorted(csv_files):
-            try:
-                csv_path = os.path.join(csv_dir, csv_file)
-                
-                # 加载12列数据
-                spans_data = self.load_csv_data(csv_path)
-                if not spans_data:
-                    continue
-                
-                # 进行图分析，添加图特征
-                enhanced_spans = self.analyze_batch_data(spans_data, mapping_data)
-                
-                # 直接更新原CSV文件
-                self.save_enhanced_csv(enhanced_spans, csv_path)
-                
+            csv_path = os.path.join(csv_dir, csv_file)
+            if self.process_single_csv_file(csv_path, mapping_data):
                 processed_count += 1
-                enhanced_count += len(enhanced_spans)
-                
-                if processed_count % 10 == 0:
-                    self.logger.info(f"已处理 {processed_count}/{total_files} 个文件")
-                
-            except Exception as e:
-                self.logger.error(f"处理文件 {csv_file} 失败: {e}")
-                continue
+                # 估算处理的span数量
+                try:
+                    import pandas as pd
+                    df = pd.read_csv(csv_path)
+                    enhanced_count += len(df)
+                except:
+                    pass
+            
+            if processed_count % 10 == 0:
+                self.logger.info(f"已处理 {processed_count}/{total_files} 个文件")
         
         # 输出详细统计信息
         self._print_analysis_stats(date_dir)
         
-        # 创建处理完成标志文件
-        self._create_processing_flags(date_dir)
-        
         self.logger.info(f"完成处理: {processed_count}/{total_files} 个文件")
-        self.logger.info(f"增强了 {enhanced_count} 条span记录")
+        self.logger.info(f"增强了约 {enhanced_count} 条span记录")
         self.logger.info(f"原CSV文件已更新为14列格式")
         return processed_count > 0
 
-    def _create_processing_flags(self, date_dir: str):
-        """创建处理完成标志文件"""
-        # 图分析处理完成标志
-        graph_flag = os.path.join(date_dir, ".graph_processed")
-        with open(graph_flag, 'w', encoding='utf-8') as f:
-            f.write(f"Graph analysis completed at: {datetime.now().isoformat()}\n")
-            f.write(f"CSV files enhanced to 14 columns with graph features\n")
-        
-        # VAE就绪标志
-        vae_flag = os.path.join(date_dir, ".vae_ready")
-        with open(vae_flag, 'w', encoding='utf-8') as f:
-            f.write(f"Data ready for VAE input at: {datetime.now().isoformat()}\n")
-            f.write(f"14-column CSV files with graph analysis features\n")
-            f.write(f"Total traces processed: {self.analysis_stats['total_traces']}\n")
-        
-        self.logger.info("✅ 已创建处理完成标志: .graph_processed, .vae_ready")
-
-    def _print_analysis_stats(self, date_dir: str):
-        """输出分析统计信息"""
-        stats = self.analysis_stats
-        total_traces = stats["total_traces"]
-        
-        if total_traces == 0:
-            self.logger.warning("没有处理到任何trace数据")
-            return
-        
-        self.logger.info("=== 图分析统计信息 ===")
-        self.logger.info(f"处理的trace总数: {total_traces}")
-        
-        # 延迟标签分布
-        lat_dist = stats["latency_distribution"]
-        self.logger.info("延迟标签分布:")
-        self.logger.info(f"  正常(0): {lat_dist['0']} ({lat_dist['0']/total_traces*100:.1f}%)")
-        self.logger.info(f"  中等(1): {lat_dist['1']} ({lat_dist['1']/total_traces*100:.1f}%)")
-        self.logger.info(f"  高延迟(2): {lat_dist['2']} ({lat_dist['2']/total_traces*100:.1f}%)")
-        
-        # 结构标签分布
-        struct_dist = stats["structure_distribution"]
-        self.logger.info("结构标签分布:")
-        self.logger.info(f"  简单(0): {struct_dist['0']} ({struct_dist['0']/total_traces*100:.1f}%)")
-        self.logger.info(f"  中等(1): {struct_dist['1']} ({struct_dist['1']/total_traces*100:.1f}%)")
-        self.logger.info(f"  复杂(2): {struct_dist['2']} ({struct_dist['2']/total_traces*100:.1f}%)")
-        
-        # 数值分布统计
-        if stats["latency_values"]:
-            lat_values = stats["latency_values"]
-            self.logger.info(f"延迟分布: min={min(lat_values):.0f}ms, "
-                           f"median={np.median(lat_values):.0f}ms, "
-                           f"max={max(lat_values):.0f}ms")
-        
-        if stats["complexity_values"]:
-            comp_values = stats["complexity_values"]
-            self.logger.info(f"复杂度分布: min={min(comp_values):.2f}, "
-                           f"median={np.median(comp_values):.2f}, "
-                           f"max={max(comp_values):.2f}")
-        
-        # 保存统计信息到文件
-        stats_file = os.path.join(date_dir, "graph_analysis_stats.json")
-        with open(stats_file, 'w', encoding='utf-8') as f:
-            json.dump({
-                "analysis_date": datetime.now().isoformat(),
-                "total_traces": total_traces,
-                "latency_distribution": lat_dist,
-                "structure_distribution": struct_dist,
-                "thresholds_used": {
-                    "latency": self.dynamic_latency_thresholds if self.use_dynamic_thresholds and self.dynamic_latency_thresholds else self.latency_thresholds,
-                    "structure": self.dynamic_structure_thresholds if self.use_dynamic_thresholds and self.dynamic_structure_thresholds else self.structure_thresholds
-                },
-                "dynamic_thresholds_enabled": self.use_dynamic_thresholds
-            }, f, indent=2, ensure_ascii=False)
-
-    def run_post_processing(self, specific_date: str = None) -> bool:
-        """运行后处理"""
-        if not os.path.exists(self.data_dir):
-            self.logger.error(f"数据目录不存在: {self.data_dir}")
+    def process_specific_csv_file(self, csv_file_path: str) -> bool:
+        """处理指定的CSV文件"""
+        if not os.path.exists(csv_file_path):
+            self.logger.error(f"CSV文件不存在: {csv_file_path}")
             return False
         
-        if specific_date:
-            # 处理特定日期
-            date_dir = os.path.join(self.data_dir, specific_date)
-            if not os.path.exists(date_dir):
-                self.logger.error(f"日期目录不存在: {date_dir}")
-                return False
-            
-            self.logger.info(f"后处理日期: {specific_date}")
-            return self.process_date_directory(date_dir)
-        else:
-            # 处理所有日期
-            date_dirs = [d for d in os.listdir(self.data_dir) 
-                        if os.path.isdir(os.path.join(self.data_dir, d)) 
-                        and d.count('-') == 2]  # YYYY-MM-DD 格式
-            
-            if not date_dirs:
-                self.logger.error("未找到日期目录")
-                return False
-            
-            self.logger.info(f"发现 {len(date_dirs)} 个日期目录")
-            
-            success_count = 0
-            for date_dir in sorted(date_dirs):
-                self.logger.info(f"后处理日期: {date_dir}")
-                date_path = os.path.join(self.data_dir, date_dir)
-                if self.process_date_directory(date_path):
-                    success_count += 1
-            
-            self.logger.info(f"成功处理 {success_count}/{len(date_dirs)} 个日期")
-            return success_count > 0
+        # 获取日期目录以加载映射数据
+        date_dir = os.path.dirname(os.path.dirname(csv_file_path))  # 从csv/文件夹上两级
+        mapping_data = self.load_mapping_data(date_dir)
+        
+        return self.process_single_csv_file(csv_file_path, mapping_data)
+
+    def _create_processing_flags(self, date_dir: str):
+        """移除全局标志创建，改为按文件创建"""
+        # 这个方法现在不需要了，因为我们按文件创建标志
+        pass
+
+    # ...existing code...
 
 def main():
     import argparse
@@ -681,20 +615,17 @@ def main():
 使用示例:
   python graph_post_processor.py                     # 处理所有日期（动态阈值）
   python graph_post_processor.py --date 2025-06-18  # 处理特定日期
+  python graph_post_processor.py --file trace/2025-06-18/csv/14_30.csv  # 处理特定文件
   python graph_post_processor.py --static-thresholds # 使用静态阈值
-  python graph_post_processor.py --data-dir ./traces # 指定数据目录
-  
-输出说明:
-  原始12列文件将被直接更新为14列文件
-  处理完成后会创建 .graph_processed 和 .vae_ready 标志文件
-  分析统计: trace_output/YYYY-MM-DD/graph_analysis_stats.json
         """,
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument("--date", type=str, 
                        help="处理特定日期 (YYYY-MM-DD)")
-    parser.add_argument("--data-dir", type=str, default="trace_output",
-                       help="数据目录路径，默认: trace_output")
+    parser.add_argument("--file", type=str,
+                       help="处理特定CSV文件")
+    parser.add_argument("--data-dir", type=str, default="trace",
+                       help="数据目录路径，默认: trace")
     parser.add_argument("--static-thresholds", action="store_true",
                        help="使用静态阈值而不是动态阈值")
     
@@ -717,7 +648,12 @@ def main():
     )
     
     try:
-        success = processor.run_post_processing(specific_date=args.date)
+        if args.file:
+            # 处理特定文件
+            success = processor.process_specific_csv_file(args.file)
+        else:
+            # 处理日期或所有数据
+            success = processor.run_post_processing(specific_date=args.date)
         return 0 if success else 1
     except KeyboardInterrupt:
         print("后处理已中断")

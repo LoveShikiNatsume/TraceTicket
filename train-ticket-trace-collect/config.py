@@ -10,12 +10,12 @@ class Config:
     REQUEST_TIMEOUT = 30
     
     # 采集配置
-    DEFAULT_COLLECTION_INTERVAL = 60  # 默认采集间隔（秒）- 改为1分钟
+    DEFAULT_COLLECTION_INTERVAL = 60  # 默认采集间隔（秒）
     LOOKBACK_PERIOD = "5m"           # 回看时间窗口
     
     SCRIPT_DIR = Path(__file__).resolve().parent
     PROJECT_ROOT = SCRIPT_DIR.parent
-    OUTPUT_DIR = str(PROJECT_ROOT / "trace_output")
+    OUTPUT_DIR = str(PROJECT_ROOT / "trace")
     
     def ensure_output_dir(self) -> str:
         """确保输出目录存在并返回路径"""
