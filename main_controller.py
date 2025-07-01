@@ -3,8 +3,8 @@
 Train Ticket 异常检测系统主控制器
 
 Author: LoveShikiNatsume
-Date: 2025-06-18
-Version: 1.4 使用实际压测脚本测试
+Date: 2025-07-01
+Version: 1.5 简化压测处理，移除故障注入启动
 """
 
 import os
@@ -36,9 +36,15 @@ class TrainTicketAnomalyDetectionController:
         self.component_status = {
             "load_test": "未开始",
             "data_collection": "未开始",
-            "metrics_collection": "未开始",  # 新增
-            "anomaly_detection": "未开始",
-            "fault_injection": "未开始"
+            "metrics_collection": "未开始",
+            "anomaly_detection": "未开始"
+        }
+        
+        # 压测统计
+        self.load_test_stats = {
+            "total_requests": 0,
+            "successful_requests": 0,
+            "last_update": None
         }
         
         # 运行结果存储
@@ -62,15 +68,13 @@ class TrainTicketAnomalyDetectionController:
                 "check_interval_seconds": 30,
                 "auto_process_delay_seconds": 65,
                 "detection_threshold": 0.15,
-                "warmup_minutes": 3  # 压测预热时间，之后开始注入故障
+                "warmup_minutes": 3
             },
             "data_collection": {
                 "interval_seconds": 60,
                 "lookback_period": "5m"
             },
-            "scripts": {  # 执行脚本路径配置
-                "load_test": "train-ticket-auto-query/xxx.py",
-                "fault_injection": "train-ticket-chaos-mesh/xxx.py",
+            "scripts": {
                 "anomaly_detection": "anomaly-detection/vae_detector.py"
             }
         }
@@ -140,83 +144,67 @@ class TrainTicketAnomalyDetectionController:
         """启动压测脚本"""
         self.logger.info("启动压测模块...")
         
-        script_path = self.project_root / self.config["scripts"]["load_test"]
         run_script = self.project_root / "train-ticket-auto-query" / "run.py"
         
-        if os.path.exists(run_script):
-            self.logger.info(f"使用实际压测脚本: {run_script}")
-            try:
-                cmd = [sys.executable, str(run_script)]
-                
-                process = subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    universal_newlines=True,
-                    cwd=str(self.project_root)
-                )
-                
-                time.sleep(2)  # 等待脚本启动
-                if process.poll() is None:
-                    self.logger.info("压测模块启动成功")
-                    return process
-                else:
-                    self.logger.error(f"压测启动失败，退出码: {process.returncode}")
-                    return None
-                    
-            except Exception as e:
-                self.logger.error(f"压测启动异常: {e}")
-                return None
+        if not os.path.exists(run_script):
+            self.logger.error(f"压测脚本不存在: {run_script}")
+            return None
         
-        elif not os.path.exists(script_path):
-            self.logger.info(f"使用模拟压测实现 (脚本路径: {script_path})")
+        try:
+            cmd = [sys.executable, str(run_script)]
             
-            try:
-                cmd = [
-                    sys.executable, "-c",
-                    """
-import time
-import sys
-import signal
-
-def signal_handler(signum, frame):
-    print("模拟压测收到停止信号")
-    sys.exit(0)
-
-signal.signal(signal.SIGTERM, signal_handler)
-signal.signal(signal.SIGINT, signal_handler)
-
-try:
-    print("模拟压测运行中...")
-    while True:
-        time.sleep(60)
-except (KeyboardInterrupt, SystemExit):
-    print("模拟压测已停止")
-                    """
-                ]
-                
-                process = subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    universal_newlines=True,
-                    cwd=str(self.project_root)
-                )
-                
-                time.sleep(1)
-                if process.poll() is None:
-                    self.logger.info("压测模块启动成功")
-                    return process
-                else:
-                    self.logger.error(f"压测启动失败，退出码: {process.returncode}")
-                    return None
-                    
-            except Exception as e:
-                self.logger.error(f"压测启动异常: {e}")
+            # 设置环境变量启用安静模式
+            env = os.environ.copy()
+            env['PRESSURE_TEST_QUIET'] = 'true'
+            
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                universal_newlines=True,
+                bufsize=1,
+                cwd=str(self.project_root),
+                env=env
+            )
+            
+            # 启动一个线程来读取压测输出并统计成功请求数
+            def read_and_count_stats():
+                try:
+                    for line in process.stdout:
+                        line = line.strip()
+                        if "[压测状态]" in line and "完成请求:" in line and "成功率:" in line:
+                            try:
+                                parts = line.split("完成请求:")[1].split(",")[0].strip()
+                                total_requests = int(parts)
+                                
+                                success_parts = line.split("成功率:")[1].split("%")[0].strip()
+                                success_rate = float(success_parts)
+                                
+                                successful_requests = int(total_requests * success_rate / 100)
+                                
+                                self.load_test_stats["total_requests"] = total_requests
+                                self.load_test_stats["successful_requests"] = successful_requests
+                                self.load_test_stats["last_update"] = datetime.now()
+                                
+                            except (ValueError, IndexError):
+                                pass
+                except:
+                    pass
+            
+            stats_thread = threading.Thread(target=read_and_count_stats, daemon=True)
+            stats_thread.start()
+            
+            time.sleep(3)
+            if process.poll() is None:
+                self.logger.info("压测模块启动成功")
+                self.component_status["load_test"] = "运行中"
+                return process
+            else:
+                self.logger.error(f"压测启动失败，退出码: {process.returncode}")
                 return None
-        
-        else:
-            self.logger.error(f"压测脚本不存在: {script_path}")
+                
+        except Exception as e:
+            self.logger.error(f"压测启动异常: {e}")
             return None
 
     def start_data_collection(self, duration_minutes: int = 0) -> Optional[subprocess.Popen]:
@@ -267,64 +255,6 @@ except (KeyboardInterrupt, SystemExit):
                 return None
         except Exception as e:
             self.logger.error(f"指标采集启动异常: {e}")
-            return None
-
-    def start_fault_injection(self) -> Optional[subprocess.Popen]:
-        """启动故障注入"""
-        self.logger.info("启动故障注入模块...")
-        
-        script_path = self.project_root / self.config["scripts"]["fault_injection"]
-        
-        if not os.path.exists(script_path):
-            self.logger.info(f"使用模拟故障注入实现 (脚本路径: {script_path})")
-            # 创建记录目录
-            record_dir = self.project_root / "fault_injection_records"
-            record_dir.mkdir(exist_ok=True)
-            
-            # 写入模拟的故障记录
-            self._generate_mock_fault_records()
-        
-        # 使用简化的模拟方式
-        try:
-            cmd = [
-                sys.executable, "-c",
-                """
-import time
-import sys
-import signal
-
-def signal_handler(signum, frame):
-    sys.exit(0)
-
-signal.signal(signal.SIGTERM, signal_handler)
-signal.signal(signal.SIGINT, signal_handler)
-
-try:
-    while True:
-        time.sleep(300)  # 每5分钟检查一次
-except (KeyboardInterrupt, SystemExit):
-    pass
-                """
-            ]
-            
-            process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                universal_newlines=True,
-                cwd=str(self.project_root)
-            )
-            
-            time.sleep(1)
-            if process.poll() is None:
-                self.logger.info("故障注入模块启动成功")
-                return process
-            else:
-                self.logger.error(f"故障注入启动失败，退出码: {process.returncode}")
-                return None
-                
-        except Exception as e:
-            self.logger.error(f"故障注入启动异常: {e}")
             return None
 
     def check_for_new_data(self, target_date: str = None) -> List[str]:
@@ -397,24 +327,13 @@ except (KeyboardInterrupt, SystemExit):
             self.logger.error(f"图分析处理异常: {e}")
             return False
 
-    def _calculate_duration_minutes(self) -> float:
-        """计算运行总时长"""
-        if self.results["start_time"] and self.results["end_time"]:
-            from datetime import datetime as dt
-            start = dt.strptime(self.results["start_time"][:19], '%Y-%m-%dT%H:%M:%S')
-            end = dt.strptime(self.results["end_time"][:19], '%Y-%m-%dT%H:%M:%S')
-            return (end - start).total_seconds() / 60
-        return 0
-
     def run_real_time_monitoring(self):
         """运行实时监控模式"""
         self.logger.info("启动实时异常检测监控系统")
         self.logger.info("系统配置:")
-        self.logger.info(f"  - 预热时间: {self.config['real_time_mode']['warmup_minutes']} 分钟")
         self.logger.info(f"  - 检测阈值: {self.config['real_time_mode']['detection_threshold']}")
         self.logger.info(f"  - 检查间隔: {self.config['real_time_mode']['check_interval_seconds']} 秒")
         self.logger.info(f"脚本启动时间: {self.script_start_time.strftime('%Y-%m-%d %H:%M:%S')}")
-        self.logger.info("注意: 仅处理脚本启动后生成的新数据")
         
         self.monitoring_active = True
         self.results["start_time"] = datetime.now().isoformat()
@@ -427,7 +346,7 @@ except (KeyboardInterrupt, SystemExit):
         # 启动数据采集
         collection_process = self.start_data_collection(duration_minutes=0)
         
-        # 启动指标采集  # 新增
+        # 启动指标采集
         metrics_process = self.start_metrics_collection(duration_minutes=0)
         if not metrics_process:
             self.logger.warning("指标采集启动失败，但将继续监控")
@@ -438,14 +357,6 @@ except (KeyboardInterrupt, SystemExit):
             self.monitoring_active = False
             return
         
-        # 等待预热期结束
-        warmup_minutes = self.config["real_time_mode"]["warmup_minutes"]
-        self.logger.info(f"等待预热期 ({warmup_minutes} 分钟)...")
-        
-        # 故障注入相关状态
-        fault_injection_process = None
-        fault_injection_attempted = False
-        
         # 启动监控循环
         check_interval = self.config["real_time_mode"]["check_interval_seconds"]
         self.logger.info(f"开始实时监控 (检查间隔: {check_interval}s)")
@@ -454,17 +365,6 @@ except (KeyboardInterrupt, SystemExit):
         try:
             while self.monitoring_active:
                 elapsed_minutes = (time.time() - start_time) / 60
-                
-                # 到达预热时间后，启动故障注入（只尝试一次）
-                if elapsed_minutes >= warmup_minutes and not fault_injection_attempted:
-                    self.logger.info("预热期结束，启动故障注入")
-                    fault_injection_attempted = True
-                    fault_injection_process = self.start_fault_injection()
-                    if fault_injection_process:
-                        self.component_status["fault_injection"] = "运行中"
-                    else:
-                        self.component_status["fault_injection"] = "失败"
-                        self.logger.warning("故障注入启动失败")
                 
                 # 检查新数据
                 new_files = self.check_for_new_data()
@@ -495,31 +395,30 @@ except (KeyboardInterrupt, SystemExit):
                 else:
                     accuracy_info = "待验证"
                 
-                # 组件状态
+                # 组件状态和压测统计
                 components_status = []
-                if load_test_process:
-                    components_status.append("压测:运行")
+                
+                if load_test_process and load_test_process.poll() is None:
+                    # 压测运行中，显示统计信息
+                    total_req = self.load_test_stats["total_requests"]
+                    success_req = self.load_test_stats["successful_requests"]
+                    if total_req > 0:
+                        success_rate = (success_req / total_req) * 100
+                        components_status.append(f"压测:运行({success_req}/{total_req}, {success_rate:.1f}%)")
+                    else:
+                        components_status.append("压测:运行(统计中...)")
                 else:
                     components_status.append("压测:失败")
                     
-                if collection_process:
+                if collection_process and collection_process.poll() is None:
                     components_status.append("采集:运行")
                 else:
                     components_status.append("采集:失败")
                 
-                if metrics_process:  # 新增
+                if metrics_process and metrics_process.poll() is None:
                     components_status.append("指标:运行")
                 else:
                     components_status.append("指标:失败")
-                
-                if fault_injection_process:
-                    components_status.append("故障:运行")
-                elif fault_injection_attempted:
-                    components_status.append("故障:失败")
-                elif elapsed_minutes >= warmup_minutes:
-                    components_status.append("故障:启动中")
-                else:
-                    components_status.append(f"故障:预热中({warmup_minutes - elapsed_minutes:.1f}min)")
                 
                 # 构建监控状态信息
                 status_info = [
@@ -543,15 +442,15 @@ except (KeyboardInterrupt, SystemExit):
         finally:
             self.monitoring_active = False
             
-            # 停止所有后台进程 (添加metrics_process)
-            self._cleanup_processes(load_test_process, collection_process, metrics_process, fault_injection_process)
+            # 停止所有后台进程
+            self._cleanup_processes(load_test_process, collection_process, metrics_process)
             
             self.results["end_time"] = datetime.now().isoformat()
             
             self.show_final_summary()
 
     def show_final_summary(self):
-        """显示最终摘要（不生成文件）"""
+        """显示最终摘要"""
         detection_count = len(self.results["real_time_detections"])
         anomaly_count = len([d for d in self.results["real_time_detections"] if d["result"].get("anomaly_detected", False)])
         
@@ -579,11 +478,19 @@ except (KeyboardInterrupt, SystemExit):
             self.logger.info(f"  真阴性 (正确识别正常): {accuracy_stats['true_negative']}")
             self.logger.info(f"  假阳性 (误报): {accuracy_stats['false_positive']}")
             self.logger.info(f"  假阴性 (漏报): {accuracy_stats['false_negative']}")
+        
+        # 显示压测最终统计
+        total_req = self.load_test_stats["total_requests"]
+        success_req = self.load_test_stats["successful_requests"]
+        if total_req > 0:
+            success_rate = (success_req / total_req) * 100
+            self.logger.info(f"压测最终统计: {success_req}/{total_req} 成功率: {success_rate:.1f}%")
+        
         self.logger.info("=" * 50)
 
     def _cleanup_processes(self, *processes):
         """清理后台进程"""
-        process_names = ["压测", "数据采集", "指标采集", "故障注入"]
+        process_names = ["压测", "数据采集", "指标采集"]
         
         for i, process in enumerate(processes):
             if process:
@@ -602,79 +509,6 @@ except (KeyboardInterrupt, SystemExit):
                         self.logger.error(f"无法停止{name}")
                 except Exception as e:
                     self.logger.error(f"停止{name}时出错: {e}")
-
-    def _generate_mock_fault_records(self):
-        """生成模拟的故障注入记录文件（模拟外部注入脚本的行为）"""
-        record_dir = self.project_root / "fault_injection_records"
-        today = datetime.now().strftime("%Y-%m-%d")
-        record_file = record_dir / f"fault_records_{today}.json"
-        
-        # 如果已经存在，就不重复生成
-        if record_file.exists():
-            return
-        
-        # 生成若干个间隔的故障记录
-        current_time = datetime.now()
-        records = []
-        
-        # 模拟每10分钟产生一次故障，持续5分钟
-        for i in range(6):  # 6个周期，共60分钟
-            # 计算故障开始时间
-            fault_start_minutes = self.config["real_time_mode"]["warmup_minutes"] + i*10
-            
-            # 故障记录
-            for j in range(5):  # 每次故障持续5分钟
-                minute_offset = fault_start_minutes + j
-                
-                # 计算具体时间
-                fault_time = current_time + timedelta(minutes=minute_offset)
-                
-                # 随机选择故障类型
-                fault_types = [
-                    {"type": "high_latency", "description": "高延迟故障", "intensity": "medium"},
-                    {"type": "error_injection", "description": "错误注入故障", "intensity": "high"},
-                    {"type": "service_unavailable", "description": "服务不可用故障", "intensity": "high"},
-                    {"type": "network_delay", "description": "网络延迟故障", "intensity": "low"}
-                ]
-                
-                import random
-                fault_type = random.choice(fault_types)
-                
-                record = {
-                    "timestamp": fault_time.isoformat(),
-                    "minute_key": fault_time.strftime("%H_%M"),
-                    "date": today,
-                    "fault_type": fault_type["type"],
-                    "description": fault_type["description"],
-                    "intensity": fault_type["intensity"],
-                    "expected_anomaly": True
-                }
-                
-                records.append(record)
-            
-            # 故障间歇期（5分钟）
-            for j in range(5):
-                minute_offset = fault_start_minutes + j + 5
-                fault_time = current_time + timedelta(minutes=minute_offset)
-                
-                record = {
-                    "timestamp": fault_time.isoformat(),
-                    "minute_key": fault_time.strftime("%H_%M"),
-                    "date": today,
-                    "fault_type": "normal",
-                    "description": "系统正常运行",
-                    "intensity": "none",
-                    "expected_anomaly": False
-                }
-                
-                records.append(record)
-        
-        # 保存故障记录文件
-        with open(record_file, 'w', encoding='utf-8') as f:
-            json.dump(records, f, indent=2, ensure_ascii=False)
-        
-        self.logger.info(f"生成故障记录文件: {record_file}")
-        self.logger.info(f"记录数量: {len(records)} (包含故障期和正常期)")
 
     def process_new_files_real_time(self, csv_files: List[str]) -> bool:
         """实时处理新的CSV文件"""
@@ -780,15 +614,14 @@ except (KeyboardInterrupt, SystemExit):
                 matching_record = record
                 break
         
+        detected_anomaly = detection_result.get("anomaly_detected", False)
+        
         if not matching_record:
             # 没有故障记录 = 期望正常
-            expected_anomaly = False
-            detected_anomaly = detection_result.get("anomaly_detected", False)
-            
             validation_result = {
                 "validation": "completed",
                 "minute_key": minute_key,
-                "expected_anomaly": expected_anomaly,
+                "expected_anomaly": False,
                 "detected_anomaly": detected_anomaly,
                 "fault_info": {
                     "type": "normal",
@@ -796,15 +629,20 @@ except (KeyboardInterrupt, SystemExit):
                     "intensity": "none"
                 }
             }
-        else:
-            # 找到故障记录，使用记录中的期望
-            expected_anomaly = matching_record.get("expected_anomaly", False)
-            detected_anomaly = detection_result.get("anomaly_detected", False)
             
+            # 判断准确性：期望正常
+            if detected_anomaly:
+                validation_result["accuracy"] = "false_positive"  # 误报
+                validation_result["result"] = "false_positive: 误报异常"
+            else:
+                validation_result["accuracy"] = "true_negative"   # 正确识别正常
+                validation_result["result"] = "true_negative: 正确识别正常"
+        else:
+            # 找到故障记录，期望异常
             validation_result = {
-                "validation": "completed",
+                "validation": "completed", 
                 "minute_key": minute_key,
-                "expected_anomaly": expected_anomaly,
+                "expected_anomaly": True,  # 简化：故障记录文件中的都期望异常
                 "detected_anomaly": detected_anomaly,
                 "fault_info": {
                     "type": matching_record.get("fault_type"),
@@ -812,22 +650,14 @@ except (KeyboardInterrupt, SystemExit):
                     "intensity": matching_record.get("intensity")
                 }
             }
-        
-        # 判断检测准确性
-        if expected_anomaly == detected_anomaly:
-            if expected_anomaly:
-                validation_result["accuracy"] = "true_positive"  # 正确检测到异常
+            
+            # 判断准确性：期望异常
+            if detected_anomaly:
+                validation_result["accuracy"] = "true_positive"   # 正确检测到异常
                 validation_result["result"] = "true_positive: 正确检测到异常"
             else:
-                validation_result["accuracy"] = "true_negative"  # 正确识别正常
-                validation_result["result"] = "true_negative: 正确识别正常"
-        else:
-            if expected_anomaly and not detected_anomaly:
-                validation_result["accuracy"] = "false_negative"  # 漏报
+                validation_result["accuracy"] = "false_negative"  # 漏报异常
                 validation_result["result"] = "false_negative: 漏报异常"
-            else:
-                validation_result["accuracy"] = "false_positive"  # 误报
-                validation_result["result"] = "false_positive: 误报异常"
         
         return validation_result
 

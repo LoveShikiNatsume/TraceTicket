@@ -2,7 +2,6 @@ from atomic_queries import _query_orders, _collect_one_order, _login, _rebook_ti
 from utils import random_from_list
 import time
 
-# base_address = "http://10.176.122.1:32677"
 base_address = "http://192.168.1.102:32677"
 
 

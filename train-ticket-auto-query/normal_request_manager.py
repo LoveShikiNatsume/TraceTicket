@@ -8,10 +8,18 @@ from atomic_queries import _login, _query_orders, _query_high_speed_ticket
 
 from utils import random_boolean
 import time
+import os
+import sys
 
 from threading import Thread
 
-def main(duration_minutes=60):  # 运行指定分钟数，默认60分钟
+def main(request_interval=1.0, running_flag=None):  
+    if running_flag is None:
+        running_flag = lambda: True
+    
+    # 检查是否由主控制器调用（通过环境变量）
+    quiet_mode = os.getenv('PRESSURE_TEST_QUIET', 'false').lower() == 'true'
+    
     pairs = [('Shang Hai', 'Su Zhou'), ('Shang Hai', 'Nan Jing')]
     headers = {
         "Cookie": "JSESSIONID=21A0370861087E0831E5D25D56BC9ABB; YsbCaptcha=BE12EE0295F548569DCC1D5B07FDBA55",
@@ -19,85 +27,104 @@ def main(duration_minutes=60):  # 运行指定分钟数，默认60分钟
         "Content-Type": "application/json"
     }
 
-    start_time = time.time()
-    end_time = start_time + duration_minutes * 60
     i = 0
+    success_count = 0
     
-    while time.time() < end_time:  # 运行指定时间
+    while running_flag():
         try:
-            now_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-            print(f"now_time:{now_time}")
+            if not quiet_mode:
+                now_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+                print(f"当前时间: {now_time}")
 
             if i % 20 == 0:
                 uid, token = _login()
                 if uid is not None and token is not None:
                     headers['Authorization'] = "Bearer " + token
 
-            print(f"idx:{i}")
-            query_and_preserve(headers)
-
-            if random_boolean() and random_boolean():
-                query_one_and_cancel(headers)
-            else:
-                query_order_and_pay(headers, pairs)
-                query_and_collect_ticket(headers)
-                query_and_enter_station(headers)
+            if not quiet_mode:
+                print(f"请求索引: {i}")
+            
+            try:
+                query_and_preserve(headers)
+                success_count += 1
+                
+                if random_boolean() and random_boolean():
+                    query_one_and_cancel(headers)
+                else:
+                    query_order_and_pay(headers, pairs)
+                    query_and_collect_ticket(headers)
+                    query_and_enter_station(headers)
+                    
+            except Exception as query_error:
+                if not quiet_mode:
+                    print(f"查询操作失败: {query_error}")
             
             i += 1
-            time.sleep(1)
+            
+            # 安静模式下每50次操作报告一次状态
+            if quiet_mode and i % 50 == 0:
+                success_rate = (success_count / i) * 100
+                print(f"[压测状态] 完成请求: {i}, 成功率: {success_rate:.1f}%")
+            
+            time.sleep(request_interval)
+            
+            if not running_flag():
+                if quiet_mode:
+                    print(f"[压测] 收到停止信号，退出测试循环 (完成 {i} 次请求)")
+                else:
+                    print("收到停止信号，退出测试循环")
+                break
+                
         except Exception as e:
-            print(f"main loop error at index {i}: {e}")
+            if not quiet_mode:
+                print(f"主循环在索引 {i} 处发生错误: {e}")
             i += 1
+            if not running_flag():
+                break
+
+    # 最终统计
+    if quiet_mode:
+        success_rate = (success_count / max(i, 1)) * 100
+        print(f"[压测完成] 总请求: {i}, 成功: {success_count}, 成功率: {success_rate:.1f}%")
 
 
-def main_thread(duration_minutes=60, running_flag=None):
-    """主压测线程，支持外部停止控制"""
-    import threading
-    import time
-    
+def main_thread(thread_count=5, request_interval=1.0, running_flag=None):
     if running_flag is None:
         running_flag = lambda: True
     
-    def worker_thread(thread_id):
-        """工作线程"""
-        print(f"压测线程 {thread_id} 启动")
-        
-        while running_flag():
-            try:
-                # 这里放置实际的压测逻辑
-                # 例如：发送HTTP请求到Train Ticket系统
-                
-                # 模拟压测请求
-                time.sleep(1)  # 1秒一次请求
-                
-                # 检查是否需要停止
-                if not running_flag():
-                    break
-                    
-            except Exception as e:
-                print(f"压测线程 {thread_id} 异常: {e}")
-                if not running_flag():
-                    break
-                time.sleep(5)  # 异常后等待5秒
-        
-        print(f"压测线程 {thread_id} 已停止")
+    # 检查是否由主控制器调用
+    quiet_mode = os.getenv('PRESSURE_TEST_QUIET', 'false').lower() == 'true'
     
-    # 启动5个压测线程
     threads = []
-    for i in range(5):
-        thread = threading.Thread(target=worker_thread, args=(i+1,))
-        thread.daemon = True  # 设置为守护线程
-        threads.append(thread)
-        thread.start()
-    
+
+    start_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+    if quiet_mode:
+        print(f"[压测启动] 时间: {start_time}, 线程数: {thread_count}")
+    else:
+        print(f"测试开始: {start_time}, 线程数: {thread_count}, 请求间隔: {request_interval}秒")
+
+    for i in range(thread_count):
+        t = Thread(name="thread" + str(i), target=main, args=(request_interval, running_flag))
+        time.sleep(1)
+        t.start()
+        threads.append(t)
+
     # 等待所有线程完成或收到停止信号
-    try:
-        while running_flag() and any(t.is_alive() for t in threads):
-            time.sleep(1)
-    except KeyboardInterrupt:
-        print("收到中断信号，停止压测")
-    
-    print("所有压测线程已停止")
+    for t in threads:
+        while t.is_alive() and running_flag():
+            time.sleep(0.1)
+        if not running_flag():
+            if quiet_mode:
+                print("[压测] 主线程收到停止信号")
+            else:
+                print("主线程收到停止信号")
+            break
+
+    end_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+    if quiet_mode:
+        print(f"[压测结束] 时间: {end_time}")
+    else:
+        print(f"测试开始: {start_time}, 测试结束: {end_time}")
 
 
 def query_order():
