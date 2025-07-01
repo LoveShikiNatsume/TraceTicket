@@ -5,7 +5,7 @@ Train Ticket Trace Collector for Anomaly Detection
 
 Author: LoveShikiNatsume
 Date: 2025-06-18
-Version: 2.1 修改时间过滤逻辑
+Version: 2.2 输出11列基础数据，移除标签计算
 """
 
 import requests
@@ -244,44 +244,8 @@ class AnomalyDetectionTraceCollector:
         
         return 0
 
-    def _calculate_node_latency_label(self, duration_ms: float) -> int:
-        """计算节点延迟标签：0=快速(<100ms), 1=中等(<1s), 2=慢速(>=1s)"""
-        if duration_ms < 100:
-            return 0
-        elif duration_ms < 1000:
-            return 1
-        else:
-            return 2
-
-    def _safe_int_from_hex(self, hex_value, default=0) -> int:
-        """将十六进制字符串转换为整数"""
-        try:
-            if hex_value is None or hex_value == "":
-                return default
-            if isinstance(hex_value, (int, float)):
-                return int(hex_value)
-            hex_str = str(hex_value)
-            if hex_str.startswith('0x'):
-                return int(hex_str, 16)
-            else:
-                return int(hex_str, 16)
-        except:
-            return default
-
-    def _extract_tags(self, tag_list: List[Dict]) -> Dict[str, str]:
-        """提取 span 标签到字典"""
-        tags = {}
-        for tag in tag_list:
-            try:
-                key = str(tag.get("key", ""))
-                value = str(tag.get("value", ""))
-                tags[key] = value
-            except:
-                continue
-        return tags
-
     def parse_traces(self, traces: List[Dict]) -> List[Dict]:
-        """解析链路数据为异常检测所需格式"""
+        """解析链路数据为异常检测所需格式 - 输出11列基础数据"""
         parsed_spans = []
         
         for trace in traces:
@@ -340,12 +304,11 @@ class AnomalyDetectionTraceCollector:
                         has_error = True
                         self.stats["error_spans"] += 1
                     
-                    node_latency_label = self._calculate_node_latency_label(duration_ms)
-                    
                     db_hash = self._calculate_db_hash(span_tags)
                     if db_hash > 0:
                         self.stats["db_spans"] += 1
                     
+                    # 构建11列基础数据记录
                     span_data = {
                         "traceIdHigh": trace_id_high,
                         "traceIdLow": trace_id_low,
@@ -358,8 +321,8 @@ class AnomalyDetectionTraceCollector:
                         "status": status,
                         "operationName": operation_encoded,
                         "serviceName": service_encoded,
-                        "nodeLatencyLabel": node_latency_label,
                         
+                        # 用于调试的额外字段（不写入CSV）
                         "_original_trace_id": trace_id,
                         "_original_span_id": raw_span_id,
                         "_original_parent_span_id": raw_parent_span_id,
@@ -405,14 +368,15 @@ class AnomalyDetectionTraceCollector:
         self.logger.info(f"保存数据: {len(data)} spans -> {today}/{filename}")
 
     def _save_csv(self, data: List[Dict], filepath: str):
-        """保存为异常检测专用的 CSV 格式"""
+        """保存为11列基础数据的 CSV 格式"""
         if not data:
             return
         
+        # 定义11列基础数据字段
         fieldnames = [
             "traceIdHigh", "traceIdLow", "parentSpanId", "spanId", 
             "startTime", "duration", "nanosecond", "DBhash", "status",
-            "operationName", "serviceName", "nodeLatencyLabel"
+            "operationName", "serviceName"
         ]
         
         with open(filepath, 'w', newline='', encoding='utf-8-sig') as f:

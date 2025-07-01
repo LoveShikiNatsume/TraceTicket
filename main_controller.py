@@ -4,7 +4,7 @@ Train Ticket 异常检测系统主控制器
 
 Author: LoveShikiNatsume
 Date: 2025-07-01
-Version: 1.5 简化压测处理，移除故障注入启动
+Version: 1.6 修改异常检测逻辑，基于CSV标签进行准确性验证
 """
 
 import os
@@ -271,8 +271,8 @@ class TrainTicketAnomalyDetectionController:
         current_time = datetime.now()
         
         for csv_file in csv_files:
-            # 检查是否已有对应的.graph_processed标志文件
-            flag_file = str(csv_file).replace('.csv', '.graph_processed')
+            # 检查是否已有对应的.label_processed标志文件
+            flag_file = str(csv_file).replace('.csv', '.label_processed')
             
             if os.path.exists(flag_file):
                 continue
@@ -303,12 +303,12 @@ class TrainTicketAnomalyDetectionController:
         return new_files
 
     def process_collected_data(self, csv_file_path: str = None, target_date: str = None):
-        """处理采集的数据（图分析）"""
-        processor_script = self.project_root / "train-ticket-trace-collect" / "graph_post_processor.py"
+        """处理采集的数据（异常标签生成）"""
+        processor_script = self.project_root / "train-ticket-trace-collect" / "trace_label_processor.py"
         
         # 检查脚本是否存在
         if not processor_script.exists():
-            self.logger.error(f"图分析脚本不存在: {processor_script}")
+            self.logger.error(f"标签处理脚本不存在: {processor_script}")
             return False
         
         try:
@@ -321,10 +321,10 @@ class TrainTicketAnomalyDetectionController:
                 if target_date:
                     cmd.extend(["--date", target_date])
             
-            result = self._run_subprocess(cmd, "graph_processing", timeout=300)
+            result = self._run_subprocess(cmd, "label_processing", timeout=300)
             return result is not None and (not hasattr(result, 'returncode') or result.returncode == 0)
         except Exception as e:
-            self.logger.error(f"图分析处理异常: {e}")
+            self.logger.error(f"标签处理异常: {e}")
             return False
 
     def run_real_time_monitoring(self):
@@ -517,21 +517,21 @@ class TrainTicketAnomalyDetectionController:
         
         self.logger.info(f"处理新数据文件: {len(csv_files)} 个")
         
-        # 对每个新文件进行图分析和异常检测
+        # 对每个新文件进行标签生成和异常检测
         for csv_file in csv_files:
             try:
-                # 先进行图分析处理
-                self.logger.debug(f"图分析: {os.path.basename(csv_file)}")
+                # 先进行标签生成处理
+                self.logger.debug(f"标签生成: {os.path.basename(csv_file)}")
                 success = self.process_collected_data(csv_file_path=csv_file)
                 
                 if not success:
-                    self.logger.warning(f"图分析失败: {os.path.basename(csv_file)}")
+                    self.logger.warning(f"标签生成失败: {os.path.basename(csv_file)}")
                     continue
                 
                 # 检查是否生成了处理标志
-                flag_file = csv_file.replace('.csv', '.graph_processed')
+                flag_file = csv_file.replace('.csv', '.label_processed')
                 if not os.path.exists(flag_file):
-                    self.logger.warning(f"图分析标志文件缺失: {os.path.basename(flag_file)}")
+                    self.logger.warning(f"标签处理标志文件缺失: {os.path.basename(flag_file)}")
                     continue
                 
                 # 调用异常检测
@@ -548,18 +548,72 @@ class TrainTicketAnomalyDetectionController:
         
         return True
 
-    def run_anomaly_detection(self, csv_file: str) -> Dict:
-        """调用异常检测脚本（模拟）"""
+    def get_expected_anomaly_from_csv(self, csv_file: str) -> Dict:
+        """从CSV文件的标签列读取期望的异常结果"""
+        try:
+            import pandas as pd
+            df = pd.read_csv(csv_file)
+            
+            # 检查是否为14列格式（包含标签）
+            if len(df.columns) != 14:
+                return {
+                    "has_labels": False,
+                    "reason": f"CSV文件列数不匹配，期望14列，实际{len(df.columns)}列"
+                }
+            
+            # 检查标签列是否存在
+            label_columns = ['nodeLatencyLabel', 'graphLatencyLabel', 'graphStructureLabel']
+            missing_columns = [col for col in label_columns if col not in df.columns]
+            
+            if missing_columns:
+                return {
+                    "has_labels": False,
+                    "reason": f"缺少标签列: {missing_columns}"
+                }
+            
+            # 统计标签分布
+            node_labels = df['nodeLatencyLabel'].value_counts().to_dict()
+            graph_labels = df['graphLatencyLabel'].value_counts().to_dict()
+            
+            # 判断是否期望异常：任一标签有异常值(1)则期望异常
+            has_node_anomaly = node_labels.get(1, 0) > 0
+            has_graph_anomaly = graph_labels.get(1, 0) > 0
+            expected_anomaly = has_node_anomaly or has_graph_anomaly
+            
+            return {
+                "has_labels": True,
+                "expected_anomaly": expected_anomaly,
+                "total_spans": len(df),
+                "unique_traces": len(df['traceIdLow'].unique()) if 'traceIdLow' in df.columns else 0,
+                "label_distribution": {
+                    "nodeLatencyLabel": node_labels,
+                    "graphLatencyLabel": graph_labels,
+                    "anomaly_spans": node_labels.get(1, 0) + graph_labels.get(1, 0)
+                },
+                "anomaly_reason": "标签显示异常" if expected_anomaly else "标签显示正常"
+            }
+            
+        except Exception as e:
+            return {
+                "has_labels": False,
+                "reason": f"读取CSV文件失败: {e}"
+            }
+
+    def call_anomaly_detection_model(self, csv_file: str) -> Dict:
+        """调用异常检测模型（当前为模拟实现）"""
         self.logger.debug(f"异常检测: {os.path.basename(csv_file)}")
+        
+        # TODO: 这里可以替换为真实的异常检测模型调用
+        # 例如：result = subprocess.run([python, model_script, csv_file])
         
         script_path = self.project_root / self.config["scripts"]["anomaly_detection"]
         
         if not os.path.exists(script_path):
-            self.logger.debug(f"使用模拟异常检测 (脚本路径: {script_path})")
+            self.logger.debug(f"使用模拟异常检测 (真实模型路径: {script_path})")
         
-        # 读取文件基本信息
-        import pandas as pd
+        # 读取文件基本信息用于模拟
         try:
+            import pandas as pd
             df = pd.read_csv(csv_file)
             trace_count = len(df['traceIdLow'].unique()) if 'traceIdLow' in df.columns else 0
             span_count = len(df)
@@ -582,6 +636,7 @@ class TrainTicketAnomalyDetectionController:
             "anomaly_score": round(anomaly_score, 4),
             "threshold": threshold,
             "anomaly_detected": is_anomaly,
+            "model_confidence": round(abs(anomaly_score - threshold), 4),
             "anomaly_types": []
         }
         
@@ -591,127 +646,132 @@ class TrainTicketAnomalyDetectionController:
             
         return result
 
-    def validate_detection_result(self, detection_result: Dict) -> Dict:
-        """验证检测结果与故障注入记录的匹配度"""
-        file_name = detection_result.get("file_name", "")
-        if not file_name.endswith(".csv"):
-            return {"validation": "skipped", "reason": "invalid_filename"}
+    def validate_detection_accuracy(self, expected_anomaly: bool, detected_anomaly: bool, 
+                                   label_info: Dict, detection_result: Dict) -> Dict:
+        """验证检测准确性"""
+        # 计算准确性类别
+        if expected_anomaly and detected_anomaly:
+            accuracy = "true_positive"
+            result_desc = "正确检测到异常"
+        elif not expected_anomaly and not detected_anomaly:
+            accuracy = "true_negative"
+            result_desc = "正确识别正常"
+        elif not expected_anomaly and detected_anomaly:
+            accuracy = "false_positive"
+            result_desc = "误报异常"
+        else:  # expected_anomaly and not detected_anomaly
+            accuracy = "false_negative"
+            result_desc = "漏报异常"
         
-        # 从文件名提取时间 (HH_MM.csv)
-        try:
-            minute_key = file_name.replace(".csv", "")
-            target_date = datetime.now().strftime("%Y-%m-%d")
-        except:
-            return {"validation": "failed", "reason": "filename_parse_error"}
-        
-        # 加载故障记录
-        fault_records = self.load_fault_injection_records(target_date)
-        
-        # 查找对应时间的故障记录
-        matching_record = None
-        for record in fault_records:
-            if record.get("minute_key") == minute_key:
-                matching_record = record
-                break
-        
-        detected_anomaly = detection_result.get("anomaly_detected", False)
-        
-        if not matching_record:
-            # 没有故障记录 = 期望正常
-            validation_result = {
-                "validation": "completed",
-                "minute_key": minute_key,
-                "expected_anomaly": False,
-                "detected_anomaly": detected_anomaly,
-                "fault_info": {
-                    "type": "normal",
-                    "description": "未注入故障，期望正常",
-                    "intensity": "none"
-                }
+        validation_result = {
+            "validation": "completed",
+            "expected_anomaly": expected_anomaly,
+            "detected_anomaly": detected_anomaly,
+            "accuracy": accuracy,
+            "result": f"{accuracy}: {result_desc}",
+            "label_info": {
+                "total_spans": label_info.get("total_spans", 0),
+                "unique_traces": label_info.get("unique_traces", 0),
+                "anomaly_spans": label_info.get("label_distribution", {}).get("anomaly_spans", 0),
+                "anomaly_reason": label_info.get("anomaly_reason", "未知")
+            },
+            "model_info": {
+                "anomaly_score": detection_result.get("anomaly_score", 0),
+                "threshold": detection_result.get("threshold", 0),
+                "confidence": detection_result.get("model_confidence", 0)
             }
-            
-            # 判断准确性：期望正常
-            if detected_anomaly:
-                validation_result["accuracy"] = "false_positive"  # 误报
-                validation_result["result"] = "false_positive: 误报异常"
-            else:
-                validation_result["accuracy"] = "true_negative"   # 正确识别正常
-                validation_result["result"] = "true_negative: 正确识别正常"
-        else:
-            # 找到故障记录，期望异常
-            validation_result = {
-                "validation": "completed", 
-                "minute_key": minute_key,
-                "expected_anomaly": True,  # 简化：故障记录文件中的都期望异常
-                "detected_anomaly": detected_anomaly,
-                "fault_info": {
-                    "type": matching_record.get("fault_type"),
-                    "description": matching_record.get("description"),
-                    "intensity": matching_record.get("intensity")
-                }
-            }
-            
-            # 判断准确性：期望异常
-            if detected_anomaly:
-                validation_result["accuracy"] = "true_positive"   # 正确检测到异常
-                validation_result["result"] = "true_positive: 正确检测到异常"
-            else:
-                validation_result["accuracy"] = "false_negative"  # 漏报异常
-                validation_result["result"] = "false_negative: 漏报异常"
+        }
         
         return validation_result
 
-    def load_fault_injection_records(self, target_date: str = None) -> List[Dict]:
-        """加载故障注入记录"""
-        target_date = target_date or datetime.now().strftime("%Y-%m-%d")
-        fault_record_dir = self.project_root / "fault_injection_records"
-        record_file = fault_record_dir / f"fault_records_{target_date}.json"
+    def run_anomaly_detection(self, csv_file: str) -> Dict:
+        """运行异常检测流程"""
+        # 1. 读取CSV标签获取期望结果
+        label_info = self.get_expected_anomaly_from_csv(csv_file)
         
-        if not record_file.exists():
-            self.logger.debug(f"故障记录文件不存在: {record_file}")
-            return []
+        if not label_info.get("has_labels", False):
+            return {
+                "file_name": os.path.basename(csv_file),
+                "error": "无法读取标签",
+                "reason": label_info.get("reason", "未知错误"),
+                "anomaly_detected": False
+            }
         
-        try:
-            with open(record_file, 'r', encoding='utf-8') as f:
-                records = json.load(f)
-            self.logger.debug(f"已加载 {len(records)} 条故障记录")
-            return records
-        except Exception as e:
-            self.logger.error(f"加载故障记录失败: {e}")
-            return []
+        # 2. 调用异常检测模型
+        detection_result = self.call_anomaly_detection_model(csv_file)
+        
+        # 3. 验证检测准确性
+        expected_anomaly = label_info.get("expected_anomaly", False)
+        detected_anomaly = detection_result.get("anomaly_detected", False)
+        
+        validation = self.validate_detection_accuracy(
+            expected_anomaly, detected_anomaly, label_info, detection_result
+        )
+        
+        # 4. 合并结果
+        detection_result["validation"] = validation
+        
+        return detection_result
+
+    def validate_detection_result(self, detection_result: Dict) -> Dict:
+        """提取验证结果（兼容原有接口）"""
+        return detection_result.get("validation", {
+            "validation": "failed",
+            "reason": "无验证信息"
+        })
 
     def report_anomaly_detection(self, csv_file: str, detection_result: Dict, validation: Dict):
         """报告异常检测结果"""
-        if detection_result.get("anomaly_detected", False):
+        file_name = os.path.basename(csv_file)
+        
+        # 检查是否有错误
+        if "error" in detection_result:
+            self.logger.error(f"检测失败 {file_name}: {detection_result.get('reason', '未知错误')}")
+            return
+        
+        detected_anomaly = detection_result.get("anomaly_detected", False)
+        expected_anomaly = validation.get("expected_anomaly", False)
+        accuracy = validation.get("accuracy", "unknown")
+        
+        # 构建结果信息
+        model_info = validation.get("model_info", {})
+        label_info = validation.get("label_info", {})
+        
+        anomaly_score = model_info.get("anomaly_score", 0)
+        threshold = model_info.get("threshold", 0)
+        confidence = model_info.get("confidence", 0)
+        
+        total_spans = label_info.get("total_spans", 0)
+        unique_traces = label_info.get("unique_traces", 0)
+        anomaly_spans = label_info.get("anomaly_spans", 0)
+        
+        if detected_anomaly:
+            # 检测到异常
+            status_icon = "✓" if accuracy in ["true_positive"] else "✗"
             self.logger.warning("=" * 60)
-            self.logger.warning("ANOMALY DETECTED")
+            self.logger.warning(f"异常检测 {status_icon} {file_name}")
             self.logger.warning("=" * 60)
-            self.logger.warning(f"文件: {detection_result['file_name']}")
-            self.logger.warning(f"异常分数: {detection_result['anomaly_score']} (阈值: {detection_result['threshold']})")
-            self.logger.warning(f"异常类型: {', '.join(detection_result.get('anomaly_types', []))}")
-            self.logger.warning(f"Trace数量: {detection_result['trace_count']}")
-            self.logger.warning(f"Span数量: {detection_result['span_count']}")
+            self.logger.warning(f"模型结果: 异常 (分数: {anomaly_score}, 阈值: {threshold}, 置信度: {confidence})")
+            self.logger.warning(f"标签期望: {'异常' if expected_anomaly else '正常'} (异常span: {anomaly_spans}/{total_spans})")
+            self.logger.warning(f"准确性评估: {validation.get('result', '未知')}")
+            self.logger.warning(f"数据统计: {unique_traces} traces, {total_spans} spans")
             
-            # 显示验证结果
-            if validation.get("validation") == "completed":
-                self.logger.warning(f"验证结果: {validation.get('result', '未知')}")
-                self.logger.warning(f"故障信息: {validation.get('fault_info', {}).get('description', '未知')}")
-                self.logger.warning(f"准确性评估: {validation.get('accuracy', '未知')}")
+            if detection_result.get("anomaly_types"):
+                self.logger.warning(f"异常类型: {', '.join(detection_result['anomaly_types'])}")
             
             self.logger.warning("=" * 60)
-            
         else:
-            # 显示正常检测结果的验证
-            if validation.get("validation") == "completed":
-                status = "CORRECT" if validation.get("accuracy") in ["true_negative", "true_positive"] else "INCORRECT"
-                self.logger.info(f"{os.path.basename(csv_file)} - NORMAL ({status})")
-            else:
-                self.logger.info(f"{os.path.basename(csv_file)} - NORMAL")
-
+            # 检测为正常
+            status_icon = "✓" if accuracy in ["true_negative"] else "✗"
+            status = "CORRECT" if accuracy in ["true_negative", "true_positive"] else "INCORRECT"
+            
+            self.logger.info(f"正常检测 {status_icon} {file_name} - {status}")
+            self.logger.info(f"  模型: 正常 (分数: {anomaly_score}) | 标签: {'异常' if expected_anomaly else '正常'} | {validation.get('result', '未知')}")
+        
         # 保存到内存中的结果列表
         self.results["real_time_detections"].append({
             "timestamp": datetime.now().isoformat(),
-            "file": os.path.basename(csv_file),
+            "file": file_name,
             "result": detection_result,
             "validation": validation
         })
