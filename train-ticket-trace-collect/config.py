@@ -6,25 +6,27 @@ from pathlib import Path
 class Config:
     def __init__(self):
         # Jaeger配置
-        self.JAEGER_HOST = os.getenv("JAEGER_HOST", "localhost")
+        self.JAEGER_HOST = os.getenv("JAEGER_HOST", "192.168.1.102")
         self.JAEGER_PORT = os.getenv("JAEGER_PORT", "16686")
         
-        # Prometheus配置（新增）
-        self.PROMETHEUS_HOST = os.getenv("PROMETHEUS_HOST", "localhost")
+        # Prometheus配置
+        self.PROMETHEUS_HOST = os.getenv("PROMETHEUS_HOST", "192.168.1.102")
         self.PROMETHEUS_PORT = os.getenv("PROMETHEUS_PORT", "9090")
         
-        # 采集配置
-        self.DEFAULT_COLLECTION_INTERVAL = 60  # 默认采集间隔（秒）
-        self.LOOKBACK_PERIOD = "5m"           # 回看时间窗口
+        # 请求超时配置
+        self.REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "30"))
         
-        self.SCRIPT_DIR = Path(__file__).resolve().parent
-        self.PROJECT_ROOT = self.SCRIPT_DIR.parent
-        self.OUTPUT_DIR = str(self.PROJECT_ROOT / "trace")
+        # 采集配置
+        self.DEFAULT_COLLECTION_INTERVAL = int(os.getenv("COLLECTION_INTERVAL", "60"))
+        
+        # 输出目录配置
+        self.OUTPUT_DIR = os.getenv("OUTPUT_DIR", "trace")
         
     def ensure_output_dir(self) -> str:
-        """确保输出目录存在并返回路径"""
-        os.makedirs(self.OUTPUT_DIR, exist_ok=True)
-        return self.OUTPUT_DIR
+        """确保输出目录存在"""
+        output_path = Path(self.OUTPUT_DIR)
+        output_path.mkdir(exist_ok=True)
+        return str(output_path)
     
     def get_project_info(self) -> dict:
         """获取项目路径信息（用于调试）"""

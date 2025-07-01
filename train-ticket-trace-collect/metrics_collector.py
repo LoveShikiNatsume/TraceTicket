@@ -22,28 +22,21 @@ class PrometheusMetricsCollector:
     
     def __init__(self):
         self.config = Config()
-        self.prometheus_url = f"http://{getattr(self.config, 'PROMETHEUS_HOST', 'localhost')}:{getattr(self.config, 'PROMETHEUS_PORT', '9090')}"
+        self.prometheus_url = f"http://{self.config.PROMETHEUS_HOST}:{self.config.PROMETHEUS_PORT}"
         
         # 修改基础输出目录 - metrics与trace同级
         self.base_output_dir = os.path.dirname(self.config.ensure_output_dir())  # 获取trace的父目录
         
         self.logger = self._setup_logging()
         self.session = requests.Session()
-        self.session.timeout = getattr(self.config, 'REQUEST_TIMEOUT', 30)
+        self.session.timeout = self.config.REQUEST_TIMEOUT
         
-        # 简化的核心指标 - 只保留必要指标
+        # 初始的默认指标配置（将在test_connection中被智能配置覆盖）
         self.key_metrics = {
-            # CPU使用率
-            'cpu_usage_rate': 'rate(container_cpu_usage_seconds_total{namespace="trainticket"}[1m])',
-            
-            # 内存使用量（字节）
-            'memory_usage_bytes': 'container_memory_usage_bytes{namespace="trainticket"}',
-            
-            # 网络延迟（秒）
-            'network_latency_seconds': 'histogram_quantile(0.95, rate(http_request_duration_seconds_bucket{namespace="trainticket"}[1m]))',
-            
-            # 请求成功率（1 - 错误率）
-            'request_success_rate': '(rate(http_requests_total{namespace="trainticket"}[1m]) - rate(http_requests_total{namespace="trainticket",status=~"5.."}[1m])) / rate(http_requests_total{namespace="trainticket"}[1m])'
+            'cpu_usage_rate': 'rate(container_cpu_usage_seconds_total[1m])',
+            'memory_usage_bytes': 'container_memory_usage_bytes',
+            'network_latency_seconds': 'histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[1m]))',
+            'request_success_rate': '(rate(http_requests_total[1m]) - rate(http_requests_total{status=~"5.."}[1m])) / rate(http_requests_total[1m])'
         }
         
         self.collected_metrics = []
@@ -86,21 +79,26 @@ class PrometheusMetricsCollector:
         return logger
 
     def test_connection(self) -> bool:
-        """测试与Prometheus的连接"""
+        """测试与Prometheus的连接并智能检测可用指标"""
         try:
             response = self.session.get(f"{self.prometheus_url}/api/v1/label/__name__/values")
             if response.status_code == 200:
                 data = response.json()
-                metric_count = len(data.get('data', []))
+                available_metrics = data.get('data', [])
+                metric_count = len(available_metrics)
                 self.logger.info(f"连接成功，发现指标: {metric_count} 个")
                 
-                # 测试Train Ticket相关指标
-                trainticket_metrics = [m for m in data.get('data', []) if 'trainticket' in m.lower()]
-                if trainticket_metrics:
-                    self.logger.info(f"发现 Train Ticket 相关指标: {len(trainticket_metrics)} 个")
+                # 智能检测并配置指标查询
+                detected_metrics = self._detect_available_metrics(available_metrics)
+                
+                if detected_metrics:
+                    self.key_metrics = detected_metrics
+                    self.logger.info(f"成功配置 {len(detected_metrics)} 个核心指标")
+                    for metric_name, query in detected_metrics.items():
+                        self.logger.info(f"  {metric_name}: {query}")
                     return True
                 else:
-                    self.logger.warning("未发现 Train Ticket 相关指标")
+                    self.logger.warning("未找到可用的系统指标")
                     return False
             else:
                 self.logger.error(f"连接失败: HTTP {response.status_code}")
@@ -108,6 +106,90 @@ class PrometheusMetricsCollector:
         except Exception as e:
             self.logger.error(f"连接测试失败: {e}")
             return False
+
+    def _detect_available_metrics(self, available_metrics: List[str]) -> Dict[str, str]:
+        """基于可用指标智能检测和配置查询"""
+        detected = {}
+        
+        # CPU使用率检测
+        cpu_metrics = [
+            'container_cpu_usage_seconds_total',
+            'process_cpu_seconds_total', 
+            'node_cpu_seconds_total',
+            'cpu_usage_seconds_total'
+        ]
+        for metric in cpu_metrics:
+            if any(metric in m for m in available_metrics):
+                detected['cpu_usage_rate'] = f'rate({metric}[1m])'
+                self.logger.debug(f"检测到CPU指标: {metric}")
+                break
+        
+        # 内存使用量检测
+        memory_metrics = [
+            'container_memory_usage_bytes',
+            'process_resident_memory_bytes',
+            'node_memory_MemAvailable_bytes',
+            'go_memstats_alloc_bytes'
+        ]
+        for metric in memory_metrics:
+            if any(metric in m for m in available_metrics):
+                detected['memory_usage_bytes'] = metric
+                self.logger.debug(f"检测到内存指标: {metric}")
+                break
+        
+        # 网络延迟检测 (HTTP响应时间)
+        latency_metrics = [
+            'http_request_duration_seconds',
+            'request_duration_seconds',
+            'response_time_seconds',
+            'latency_seconds'
+        ]
+        for metric in latency_metrics:
+            if any(metric in m for m in available_metrics):
+                # 查找对应的bucket指标
+                bucket_metric = f"{metric}_bucket"
+                if any(bucket_metric in m for m in available_metrics):
+                    detected['network_latency_seconds'] = f'histogram_quantile(0.95, rate({bucket_metric}[1m]))'
+                    self.logger.debug(f"检测到延迟指标: {bucket_metric}")
+                    break
+        
+        # 请求成功率检测
+        request_metrics = [
+            'http_requests_total',
+            'requests_total',
+            'http_request_total'
+        ]
+        for metric in request_metrics:
+            if any(metric in m for m in available_metrics):
+                # 构建成功率查询：总请求 - 5xx错误 / 总请求
+                success_query = f'(rate({metric}[1m]) - rate({metric}{{status=~"5.."}}[1m])) / rate({metric}[1m])'
+                detected['request_success_rate'] = success_query
+                self.logger.debug(f"检测到请求指标: {metric}")
+                break
+        
+        # 如果没有找到HTTP请求指标，尝试使用up指标作为服务可用性
+        if 'request_success_rate' not in detected:
+            if any('up' in m for m in available_metrics):
+                detected['service_availability'] = 'up'
+                self.logger.debug("使用up指标作为服务可用性")
+        
+        # 补充基础指标：如果核心指标不足，添加一些通用指标
+        if len(detected) < 3:
+            # 添加Prometheus自身指标作为备选
+            fallback_metrics = {
+                'prometheus_notifications_total': 'rate(prometheus_notifications_total[1m])',
+                'prometheus_tsdb_symbol_table_size_bytes': 'prometheus_tsdb_symbol_table_size_bytes',
+                'go_goroutines': 'go_goroutines'
+            }
+            
+            for fallback_name, fallback_query in fallback_metrics.items():
+                if any(fallback_name in m for m in available_metrics):
+                    detected[f'fallback_{fallback_name}'] = fallback_query
+                    self.logger.debug(f"添加备选指标: {fallback_name}")
+                    if len(detected) >= 4:  # 确保至少有4个指标
+                        break
+        
+        return detected
 
     def collect_metrics(self) -> List[Dict]:
         """采集当前时刻的所有关键指标"""
@@ -143,7 +225,7 @@ class PrometheusMetricsCollector:
         return [metrics_data]
 
     def _query_prometheus(self, query: str) -> float:
-        """查询Prometheus获取指标值"""
+        """查询Prometheus获取指标值 - 支持or查询"""
         params = {
             'query': query,
             'time': datetime.now().timestamp()
@@ -161,13 +243,18 @@ class PrometheusMetricsCollector:
                         if len(result['value']) > 1:
                             try:
                                 value = float(result['value'][1])
-                                if not (value != value):  # 检查NaN
+                                # 检查是否为有效数值
+                                if not (value != value) and value >= 0:  # 检查NaN和负值
                                     values.append(value)
                             except (ValueError, TypeError):
                                 continue
                     
                     if values:
-                        return sum(values) / len(values)
+                        # 对于成功率，确保在0-1之间
+                        avg_value = sum(values) / len(values)
+                        if 'success_rate' in query and avg_value > 1:
+                            avg_value = min(avg_value, 1.0)
+                        return avg_value
                     
             return 0.0
             
@@ -176,7 +263,7 @@ class PrometheusMetricsCollector:
             return 0.0
 
     def save_metrics_data(self, metrics_data: List[Dict]):
-        """保存指标数据到CSV文件"""
+        """保存指标数据到CSV文件 - 改为追加模式以支持高频采集"""
         if not metrics_data:
             return
         
@@ -186,21 +273,15 @@ class PrometheusMetricsCollector:
         filename = current_time.strftime("%H_%M")
         csv_file = os.path.join(csv_dir, f"{filename}.csv")
         
-        # 简化的CSV字段名
-        fieldnames = [
-            'timestamp',           # 微秒时间戳
-            'startTime',          # 人类可读时间
-            'minute_key',         # HH_MM格式
-            'date',              # YYYY-MM-DD格式
-            'cpu_usage_rate',    # CPU使用率
-            'memory_usage_bytes', # 内存使用量
-            'network_latency_seconds', # 网络延迟
-            'request_success_rate'     # 请求成功率
-        ]
+        # 动态生成字段名（基于实际可用的指标）
+        base_fields = ['timestamp', 'startTime', 'minute_key', 'date']
+        metric_fields = list(self.key_metrics.keys())
+        fieldnames = base_fields + metric_fields
         
         # 检查文件是否存在
         file_exists = os.path.exists(csv_file)
         
+        # 使用追加模式，支持同一分钟内多次写入
         with open(csv_file, 'a', newline='', encoding='utf-8-sig') as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             if not file_exists:
@@ -211,13 +292,14 @@ class PrometheusMetricsCollector:
                 row = {field: metrics.get(field, 0.0) for field in fieldnames}
                 writer.writerow(row)
         
-        self.logger.info(f"保存指标数据: {len(metrics_data)} 样本 -> metrics/{today}/{filename}")
+        # 修复：移除依赖undefined变量的日志输出
+        self.logger.debug(f"保存指标数据: {len(metrics_data)} 样本 -> metrics/{today}/{filename}")
 
     def start_collection(self, duration_minutes: int = 60, interval_seconds: int = None) -> bool:
         """开始指标采集"""
-        # 使用默认间隔60秒
+        # 修改默认采集间隔为更高频率
         if interval_seconds is None:
-            interval_seconds = 60
+            interval_seconds = 15  # 默认15秒采集一次，而不是60秒
             
         self.logger.info("开始系统指标采集")
         
@@ -260,20 +342,21 @@ class PrometheusMetricsCollector:
                     sample_count += 1
                     self.stats["total_samples"] += 1
                 
-                # 显示进度
-                if duration_minutes > 0:
-                    elapsed_minutes = (time.time() - start_time) / 60
-                    progress_info = f"进度: {elapsed_minutes:.1f}/{duration_minutes}min"
-                else:
-                    elapsed_hours = (time.time() - start_time) / 3600
-                    progress_info = f"运行时间: {elapsed_hours:.1f}h"
-                
-                success_rate = ((self.stats["total_samples"] * len(self.key_metrics) - self.stats["failed_queries"]) / 
-                               max(self.stats["total_samples"] * len(self.key_metrics), 1)) * 100
-                
-                self.logger.info(f"指标采集状态: {progress_info} | "
-                               f"样本数: {sample_count} | "
-                               f"成功率: {success_rate:.1f}%")
+                # 显示进度 - 降低日志频率
+                if sample_count % 4 == 0:  # 每4次采集显示一次状态
+                    if duration_minutes > 0:
+                        elapsed_minutes = (time.time() - start_time) / 60
+                        progress_info = f"进度: {elapsed_minutes:.1f}/{duration_minutes}min"
+                    else:
+                        elapsed_hours = (time.time() - start_time) / 3600
+                        progress_info = f"运行时间: {elapsed_hours:.1f}h"
+                    
+                    success_rate = ((self.stats["total_samples"] * len(self.key_metrics) - self.stats["failed_queries"]) / 
+                                   max(self.stats["total_samples"] * len(self.key_metrics), 1)) * 100
+                    
+                    self.logger.info(f"指标采集状态: {progress_info} | "
+                                   f"样本数: {sample_count} | "
+                                   f"成功率: {success_rate:.1f}%")
                 
                 # 等待下一个采集周期
                 sample_duration = time.time() - sample_start
@@ -316,7 +399,7 @@ def main():
     
     parser = argparse.ArgumentParser(description="Train Ticket 系统指标采集器")
     parser.add_argument("--duration", type=int, default=30, help="采集持续时间（分钟），0=持续运行")
-    parser.add_argument("--interval", type=int, default=60, help="采集间隔（秒），默认: 60")
+    parser.add_argument("--interval", type=int, default=15, help="采集间隔（秒），默认: 15")  # 修改默认值
     parser.add_argument("--test", action="store_true", help="测试连接")
     
     args = parser.parse_args()

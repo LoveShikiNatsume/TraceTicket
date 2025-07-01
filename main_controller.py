@@ -4,7 +4,7 @@ Train Ticket 异常检测系统主控制器
 
 Author: LoveShikiNatsume
 Date: 2025-06-18
-Version: 1.3 添加指标数据采集
+Version: 1.4 使用实际压测脚本测试
 """
 
 import os
@@ -141,50 +141,82 @@ class TrainTicketAnomalyDetectionController:
         self.logger.info("启动压测模块...")
         
         script_path = self.project_root / self.config["scripts"]["load_test"]
+        run_script = self.project_root / "train-ticket-auto-query" / "run.py"
         
-        if not os.path.exists(script_path):
+        if os.path.exists(run_script):
+            self.logger.info(f"使用实际压测脚本: {run_script}")
+            try:
+                cmd = [sys.executable, str(run_script)]
+                
+                process = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    universal_newlines=True,
+                    cwd=str(self.project_root)
+                )
+                
+                time.sleep(2)  # 等待脚本启动
+                if process.poll() is None:
+                    self.logger.info("压测模块启动成功")
+                    return process
+                else:
+                    self.logger.error(f"压测启动失败，退出码: {process.returncode}")
+                    return None
+                    
+            except Exception as e:
+                self.logger.error(f"压测启动异常: {e}")
+                return None
+        
+        elif not os.path.exists(script_path):
             self.logger.info(f"使用模拟压测实现 (脚本路径: {script_path})")
-        
-        try:
-            cmd = [
-                sys.executable, "-c",
-                """
+            
+            try:
+                cmd = [
+                    sys.executable, "-c",
+                    """
 import time
 import sys
 import signal
 
 def signal_handler(signum, frame):
+    print("模拟压测收到停止信号")
     sys.exit(0)
 
 signal.signal(signal.SIGTERM, signal_handler)
 signal.signal(signal.SIGINT, signal_handler)
 
 try:
+    print("模拟压测运行中...")
     while True:
         time.sleep(60)
 except (KeyboardInterrupt, SystemExit):
-    pass
-                """
-            ]
-            
-            process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                universal_newlines=True,
-                cwd=str(self.project_root)
-            )
-            
-            time.sleep(1)
-            if process.poll() is None:
-                self.logger.info("压测模块启动成功")
-                return process
-            else:
-                self.logger.error(f"压测启动失败，退出码: {process.returncode}")
-                return None
+    print("模拟压测已停止")
+                    """
+                ]
                 
-        except Exception as e:
-            self.logger.error(f"压测启动异常: {e}")
+                process = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    universal_newlines=True,
+                    cwd=str(self.project_root)
+                )
+                
+                time.sleep(1)
+                if process.poll() is None:
+                    self.logger.info("压测模块启动成功")
+                    return process
+                else:
+                    self.logger.error(f"压测启动失败，退出码: {process.returncode}")
+                    return None
+                    
+            except Exception as e:
+                self.logger.error(f"压测启动异常: {e}")
+                return None
+        
+        else:
+            self.logger.error(f"压测脚本不存在: {script_path}")
             return None
 
     def start_data_collection(self, duration_minutes: int = 0) -> Optional[subprocess.Popen]:
@@ -871,3 +903,6 @@ def main():
     except Exception as e:
         print(f"System execution failed: {e}")
         return 1
+
+if __name__ == "__main__":
+    sys.exit(main())

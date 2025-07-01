@@ -5,7 +5,7 @@ Train Ticket Trace Collector for Anomaly Detection
 
 Author: LoveShikiNatsume
 Date: 2025-06-18
-Version: 2.0
+Version: 2.1 修改时间过滤逻辑
 """
 
 import requests
@@ -114,11 +114,25 @@ class AnomalyDetectionTraceCollector:
             return []
 
     def collect_traces(self, service: str = None, lookback: str = "5m", limit: int = 100) -> List[Dict]:
-        """从指定服务采集链路追踪数据"""
+        """从指定服务采集链路追踪数据 - 使用正确的时间参数"""
         try:
-            params = {"lookback": lookback, "limit": limit}
-            if service:
-                params["service"] = service
+            current_time = datetime.now()
+            
+            # 计算时间范围 - 最近5分钟
+            end_time_us = int(current_time.timestamp() * 1000000)  # 当前时间微秒
+            start_time_us = end_time_us - (5 * 60 * 1000000)  # 5分钟前的微秒
+            
+            # 使用正确的Jaeger API参数
+            params = {
+                "service": service if service else "",
+                "start": start_time_us,  # 开始时间（微秒）
+                "end": end_time_us,      # 结束时间（微秒）
+                "limit": limit
+            }
+            
+            # 移除空的service参数
+            if not service:
+                del params["service"]
             
             self.stats["total_requests"] += 1
             response = self.session.get(f"{self.api_url}/traces", params=params)
@@ -127,12 +141,34 @@ class AnomalyDetectionTraceCollector:
                 traces = response.json().get("data", [])
                 self.stats["successful_requests"] += 1
                 self.stats["total_traces"] += len(traces)
+                
+                self.logger.debug(f"查询时间范围: {current_time.strftime('%H:%M:%S')} 前5分钟")
+                self.logger.debug(f"获取trace数量: {len(traces)}")
+                
+                # 验证获取的trace确实在时间范围内
+                if traces and self.logger.level <= logging.DEBUG:
+                    trace_times = []
+                    for trace in traces[:3]:  # 只检查前3个trace
+                        for span in trace.get("spans", [])[:1]:  # 只检查第一个span
+                            span_time_us = span.get("startTime", 0)
+                            if span_time_us:
+                                span_time = datetime.fromtimestamp(span_time_us / 1000000)
+                                trace_times.append(span_time.strftime('%Y-%m-%d %H:%M:%S'))
+                    
+                    if trace_times:
+                        self.logger.debug(f"样本trace时间: {trace_times}")
+                
                 return traces
             else:
                 self.stats["failed_requests"] += 1
+                self.logger.debug(f"采集失败: HTTP {response.status_code}")
+                if response.status_code == 400:
+                    self.logger.debug(f"请求参数: {params}")
                 return []
+                
         except Exception as e:
             self.stats["failed_requests"] += 1
+            self.logger.debug(f"采集异常: {e}")
             return []
 
     def _encode_operation(self, operation_name: str) -> int:
@@ -389,7 +425,6 @@ class AnomalyDetectionTraceCollector:
 
     def start_collection(self, duration_minutes: int = 60, interval_seconds: int = None) -> bool:
         """开始链路追踪数据采集"""
-        # 使用配置文件中的默认间隔
         if interval_seconds is None:
             interval_seconds = self.config.DEFAULT_COLLECTION_INTERVAL
             
@@ -412,6 +447,7 @@ class AnomalyDetectionTraceCollector:
             end_time = time.time() + (duration_minutes * 60)
         
         self.logger.info(f"采集间隔: {interval_seconds} 秒")
+        self.logger.info("使用时间范围参数精确查询最近5分钟的trace")
         
         self.stats["start_time"] = datetime.now().isoformat()
         start_time = time.time()
@@ -423,7 +459,6 @@ class AnomalyDetectionTraceCollector:
                 batch_start = time.time()
                 current_date = datetime.now().strftime("%Y-%m-%d")
                 
-                # 检测日期变化
                 if last_date and last_date != current_date:
                     self.logger.info(f"日期变更: {last_date} -> {current_date}")
                 
@@ -434,7 +469,7 @@ class AnomalyDetectionTraceCollector:
                 # 采集数据
                 all_batch_data = []
                 for service in services:
-                    traces = self.collect_traces(service=service, lookback="5m", limit=50)
+                    traces = self.collect_traces(service=service, limit=50)
                     if traces:
                         parsed_data = self.parse_traces(traces)
                         all_batch_data.extend(parsed_data)
@@ -445,6 +480,16 @@ class AnomalyDetectionTraceCollector:
                     current_time = datetime.now().isoformat()
                     self.save_data(all_batch_data, current_time)
                     self.collected_data.extend(all_batch_data)
+                    
+                    # 显示采集到的数据时间范围
+                    if all_batch_data:
+                        start_times = [span.get('startTime', '') for span in all_batch_data if span.get('startTime')]
+                        if start_times:
+                            earliest = min(start_times)
+                            latest = max(start_times)
+                            self.logger.debug(f"采集时间范围: {earliest} ~ {latest}")
+                else:
+                    self.logger.debug("本轮未采集到数据")
                 
                 # 显示进度
                 if duration_minutes > 0:
