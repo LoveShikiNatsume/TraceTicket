@@ -19,31 +19,26 @@ from datetime import datetime
 import networkx as nx
 
 class TraceGraphPostProcessor:
-    """调用链图后处理器 - 直接扩展原有CSV文件为14列"""
+    """调用链图后处理器"""
     
     def __init__(self, data_dir: str = "trace", use_dynamic_thresholds: bool = True):
         self.data_dir = data_dir
         self.use_dynamic_thresholds = use_dynamic_thresholds
         self.logger = self._setup_logging()
         
-        # 调整后的图分析阈值配置 - 更符合微服务架构特征
         self.latency_thresholds = {
-            "normal": 1000,     # 正常图延迟 < 1000ms (1秒)
-            "medium": 5000,     # 中等图延迟 < 5000ms (5秒)
-            # 高延迟 >= 5000ms
+            "normal": 1000,
+            "medium": 5000,
         }
         
         self.structure_thresholds = {
-            "simple": 3.0,      # 简单结构复杂度 < 3.0
-            "medium": 8.0,      # 中等复杂度 < 8.0
-            # 复杂结构 >= 8.0
+            "simple": 3.0,
+            "medium": 8.0,
         }
         
-        # 动态阈值存储
         self.dynamic_latency_thresholds = None
         self.dynamic_structure_thresholds = None
         
-        # 统计信息
         self.analysis_stats = {
             "total_traces": 0,
             "latency_distribution": {"0": 0, "1": 0, "2": 0},
@@ -52,10 +47,9 @@ class TraceGraphPostProcessor:
             "complexity_values": []
         }
         
-        self.logger.info("图后处理器已初始化")
+        self.logger.info("图后处理器初始化完成")
         self.logger.info(f"数据目录: {data_dir}")
         self.logger.info(f"动态阈值: {'启用' if use_dynamic_thresholds else '禁用'}")
-        self.logger.info("将直接在原CSV文件上添加图分析特征列")
 
     def _setup_logging(self):
         """设置日志"""
@@ -78,7 +72,6 @@ class TraceGraphPostProcessor:
         try:
             df = pd.read_csv(csv_path)
             
-            # 验证是否是12列格式
             expected_12_columns = [
                 "traceIdHigh", "traceIdLow", "parentSpanId", "spanId", 
                 "startTime", "duration", "nanosecond", "DBhash", "status",
@@ -89,18 +82,13 @@ class TraceGraphPostProcessor:
                 self.logger.debug(f"文件 {csv_path} 已经是14列格式，跳过")
                 return []
             elif len(df.columns) != 12:
-                self.logger.warning(f"文件 {csv_path} 列数不是12列: {len(df.columns)}")
+                self.logger.warning(f"文件 {csv_path} 列数不匹配: {len(df.columns)} 列")
                 return []
             
-            # 转换为字典列表
             spans_data = df.to_dict('records')
             
-            # 为每个span添加必要的元数据用于图分析
             for span in spans_data:
-                # 重构trace_id用于分组
                 span['_trace_id'] = f"{span['traceIdHigh']}-{span['traceIdLow']}"
-                
-                # 从映射表恢复服务名（如果可能）
                 span['_service_name'] = f"service_{span['serviceName']}"
                 span['_operation_name'] = f"operation_{span['operationName']}"
             
@@ -132,14 +120,12 @@ class TraceGraphPostProcessor:
         """构建调用图"""
         G = nx.DiGraph()
         
-        # 按 trace 分组
         traces = defaultdict(list)
         for span in trace_spans:
             trace_id = span['_trace_id']
             traces[trace_id].append(span)
         
         for trace_id, spans in traces.items():
-            # 为每个 trace 构建子图
             span_map = {span['spanId']: span for span in spans}
             
             for span in spans:
@@ -148,14 +134,12 @@ class TraceGraphPostProcessor:
                 service = span.get('_service_name', 'unknown')
                 duration = span.get('duration', 0)
                 
-                # 添加节点
                 if not G.has_node(span_id):
                     G.add_node(span_id, 
                               service=service,
                               duration=duration,
                               trace_id=trace_id)
                 
-                # 添加边（父子关系）
                 if parent_id and parent_id != 0 and parent_id in span_map:
                     if not G.has_edge(parent_id, span_id):
                         G.add_edge(parent_id, span_id, 
@@ -167,38 +151,31 @@ class TraceGraphPostProcessor:
     def calculate_critical_path_latency(self, G: nx.DiGraph, trace_id: str) -> float:
         """计算关键路径延迟"""
         try:
-            # 获取该 trace 的所有节点
             trace_nodes = [n for n, d in G.nodes(data=True) if d.get('trace_id') == trace_id]
             
             if not trace_nodes:
                 return 0.0
             
-            # 创建子图
             subgraph = G.subgraph(trace_nodes)
             
-            # 找到根节点（没有前驱的节点）
             root_nodes = [n for n in subgraph.nodes() if subgraph.in_degree(n) == 0]
             
             if not root_nodes:
                 return 0.0
             
-            # 计算从根节点到所有叶节点的最长路径
             max_path_latency = 0.0
             
             for root in root_nodes:
                 try:
-                    # 计算到所有节点的最长距离
                     distances = {}
                     distances[root] = G.nodes[root].get('duration', 0)
                     
-                    # 拓扑排序
                     topo_order = list(nx.topological_sort(subgraph))
                     
                     for node in topo_order:
                         if node not in distances:
                             distances[node] = 0
                         
-                        # 更新后继节点的距离
                         for successor in subgraph.successors(node):
                             successor_duration = G.nodes[successor].get('duration', 0)
                             new_distance = distances[node] + successor_duration
@@ -206,12 +183,10 @@ class TraceGraphPostProcessor:
                             if successor not in distances or new_distance > distances[successor]:
                                 distances[successor] = new_distance
                     
-                    # 找到最大距离
                     if distances:
                         max_path_latency = max(max_path_latency, max(distances.values()))
                         
                 except nx.NetworkXError:
-                    # 如果有环，使用简单求和
                     total_duration = sum(G.nodes[n].get('duration', 0) for n in trace_nodes)
                     max_path_latency = max(max_path_latency, total_duration)
             
@@ -224,7 +199,6 @@ class TraceGraphPostProcessor:
     def calculate_structure_complexity(self, G: nx.DiGraph, trace_id: str) -> float:
         """优化的结构复杂度计算"""
         try:
-            # 获取该 trace 的所有节点
             trace_nodes = [n for n, d in G.nodes(data=True) if d.get('trace_id') == trace_id]
             
             if not trace_nodes:
@@ -233,7 +207,6 @@ class TraceGraphPostProcessor:
             subgraph = G.subgraph(trace_nodes)
             node_count = len(trace_nodes)
             
-            # 1. 计算调用链深度
             try:
                 max_depth = 0
                 root_nodes = [n for n in subgraph.nodes() if subgraph.in_degree(n) == 0]
@@ -247,44 +220,38 @@ class TraceGraphPostProcessor:
                         except:
                             continue
                 else:
-                    # 如果没有明确的根节点，使用节点数作为深度
-                    max_depth = min(node_count, 10)  # 限制最大深度
+                    max_depth = min(node_count, 10)
                     
             except:
                 max_depth = min(node_count, 10)
             
-            # 2. 计算扇出度（并行度）
             out_degrees = [subgraph.out_degree(n) for n in subgraph.nodes()]
             max_fan_out = max(out_degrees, default=1)
             avg_fan_out = sum(out_degrees) / max(len(out_degrees), 1)
             
-            # 3. 计算服务多样性
             services = set()
             for node in trace_nodes:
                 service = G.nodes[node].get('service', 'unknown')
                 services.add(service)
             service_diversity = len(services)
             
-            # 4. 检测循环
             try:
                 cycles = list(nx.simple_cycles(subgraph))
                 cycle_count = len(cycles)
             except:
                 cycle_count = 0
             
-            # 5. 计算网络密度
             possible_edges = node_count * (node_count - 1)
             actual_edges = subgraph.number_of_edges()
             density = actual_edges / max(possible_edges, 1) if possible_edges > 0 else 0
             
-            # 6. 优化的复杂度计算公式
             complexity_score = (
-                max_depth * 0.25 +          # 调用链深度
-                max_fan_out * 0.20 +        # 最大并行度
-                avg_fan_out * 0.15 +        # 平均扇出度
-                service_diversity * 0.15 +   # 服务多样性
-                cycle_count * 0.15 +        # 循环复杂度
-                density * 10 * 0.10         # 网络密度(放大10倍)
+                max_depth * 0.25 +
+                max_fan_out * 0.20 +
+                avg_fan_out * 0.15 +
+                service_diversity * 0.15 +
+                cycle_count * 0.15 +
+                density * 10 * 0.10
             )
             
             return complexity_score
@@ -299,11 +266,9 @@ class TraceGraphPostProcessor:
             self.logger.warning("数据不足，使用静态阈值")
             return
         
-        # 计算延迟阈值（使用分位数）
         latency_p33 = np.percentile(latency_values, 33)
         latency_p67 = np.percentile(latency_values, 67)
         
-        # 计算复杂度阈值
         complexity_p33 = np.percentile(complexity_values, 33)
         complexity_p67 = np.percentile(complexity_values, 67)
         
@@ -321,33 +286,32 @@ class TraceGraphPostProcessor:
         self.logger.info(f"动态复杂度阈值: 简单<{complexity_p33:.2f}, 中等<{complexity_p67:.2f}")
 
     def calculate_graph_latency_label(self, critical_path_latency: float) -> int:
-        """计算图延迟标签（支持动态阈值）"""
+        """计算图延迟标签"""
         thresholds = self.dynamic_latency_thresholds if self.use_dynamic_thresholds and self.dynamic_latency_thresholds else self.latency_thresholds
         
         if critical_path_latency < thresholds["normal"]:
-            return 0  # 正常
+            return 0
         elif critical_path_latency < thresholds["medium"]:
-            return 1  # 中等延迟
+            return 1
         else:
-            return 2  # 高延迟
+            return 2
 
     def calculate_graph_structure_label(self, complexity_score: float) -> int:
-        """计算图结构标签（支持动态阈值）"""
+        """计算图结构标签"""
         thresholds = self.dynamic_structure_thresholds if self.use_dynamic_thresholds and self.dynamic_structure_thresholds else self.structure_thresholds
         
         if complexity_score < thresholds["simple"]:
-            return 0  # 简单结构
+            return 0
         elif complexity_score < thresholds["medium"]:
-            return 1  # 中等复杂结构
+            return 1
         else:
-            return 2  # 复杂结构
+            return 2
 
     def analyze_batch_data(self, spans_data: List[Dict], mapping_data: Dict) -> List[Dict]:
         """分析一批数据并添加图特征"""
         if not spans_data:
             return []
         
-        # 使用映射表恢复真实服务名
         reverse_service_mapping = mapping_data.get('reverse_service_mapping', {})
         
         for span in spans_data:
@@ -355,16 +319,13 @@ class TraceGraphPostProcessor:
             if str(service_id) in reverse_service_mapping:
                 span['_service_name'] = reverse_service_mapping[str(service_id)]
         
-        # 构建调用图
         G = self.build_call_graph(spans_data)
         
-        # 按 trace 分组计算图特征
         traces = defaultdict(list)
         for span in spans_data:
             trace_id = span['_trace_id']
             traces[trace_id].append(span)
         
-        # 第一轮：收集所有数据用于动态阈值计算
         if self.use_dynamic_thresholds:
             batch_latency_values = []
             batch_complexity_values = []
@@ -378,26 +339,20 @@ class TraceGraphPostProcessor:
                 if complexity_score > 0:
                     batch_complexity_values.append(complexity_score)
             
-            # 累积到全局统计
             self.analysis_stats["latency_values"].extend(batch_latency_values)
             self.analysis_stats["complexity_values"].extend(batch_complexity_values)
         
-        # 为每个 trace 计算图特征
         trace_features = {}
         
         for trace_id, spans in traces.items():
             try:
-                # 计算关键路径延迟
                 critical_path_latency = self.calculate_critical_path_latency(G, trace_id)
                 
-                # 计算结构复杂度
                 complexity_score = self.calculate_structure_complexity(G, trace_id)
                 
-                # 计算标签
                 graph_latency_label = self.calculate_graph_latency_label(critical_path_latency)
                 graph_structure_label = self.calculate_graph_structure_label(complexity_score)
                 
-                # 更新统计
                 self.analysis_stats["total_traces"] += 1
                 self.analysis_stats["latency_distribution"][str(graph_latency_label)] += 1
                 self.analysis_stats["structure_distribution"][str(graph_structure_label)] += 1
@@ -418,7 +373,6 @@ class TraceGraphPostProcessor:
                     'complexity_score': 0.0
                 }
         
-        # 更新 span 数据，添加图特征
         updated_spans = []
         for span in spans_data:
             trace_id = span['_trace_id']
@@ -427,7 +381,6 @@ class TraceGraphPostProcessor:
                 'graph_structure_label': 0
             })
             
-            # 添加新字段
             span['graphLatencyLabel'] = features['graph_latency_label']
             span['graphStructureLabel'] = features['graph_structure_label']
             
@@ -440,19 +393,12 @@ class TraceGraphPostProcessor:
         if not spans_data:
             return
         
-        # 14列字段顺序
         fieldnames = [
             "traceIdHigh", "traceIdLow", "parentSpanId", "spanId", 
             "startTime", "duration", "nanosecond", "DBhash", "status",
             "operationName", "serviceName", "nodeLatencyLabel",
             "graphLatencyLabel", "graphStructureLabel"  # 新增字段
         ]
-        
-        # 备份原文件
-        backup_path = output_path + ".backup"
-        if os.path.exists(output_path):
-            import shutil
-            shutil.copy2(output_path, backup_path)
         
         with open(output_path, 'w', newline='', encoding='utf-8-sig') as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -467,27 +413,22 @@ class TraceGraphPostProcessor:
     def process_single_csv_file(self, csv_path: str, mapping_data: Dict) -> bool:
         """处理单个CSV文件并创建对应的处理标志"""
         try:
-            # 检查是否已经处理过
             processed_flag = csv_path.replace('.csv', '.graph_processed')
             if os.path.exists(processed_flag):
                 self.logger.debug(f"文件 {os.path.basename(csv_path)} 已处理，跳过")
                 return True
             
-            # 加载12列数据
             spans_data = self.load_csv_data(csv_path)
             if not spans_data:
                 return False
             
-            # 进行图分析，添加图特征
             enhanced_spans = self.analyze_batch_data(spans_data, mapping_data)
             
-            # 直接更新原CSV文件
             self.save_enhanced_csv(enhanced_spans, csv_path)
             
-            # 为这个CSV文件创建处理完成标志
             self._create_file_processing_flag(csv_path)
             
-            self.logger.info(f"✅ 已处理文件: {os.path.basename(csv_path)}")
+            self.logger.info(f"已处理文件: {os.path.basename(csv_path)}")
             return True
             
         except Exception as e:
@@ -513,7 +454,6 @@ class TraceGraphPostProcessor:
             self.logger.warning(f"CSV 目录不存在: {csv_dir}")
             return False
         
-        # 加载映射数据
         mapping_data = self.load_mapping_data(date_dir)
         
         csv_files = [f for f in os.listdir(csv_dir) if f.endswith('.csv')]
@@ -522,9 +462,8 @@ class TraceGraphPostProcessor:
             return False
         
         total_files = len(csv_files)
-        self.logger.info(f"开始处理 {total_files} 个CSV文件...")
+        self.logger.info(f"开始处理 {total_files} 个CSV文件")
         
-        # 重置统计信息
         self.analysis_stats = {
             "total_traces": 0,
             "latency_distribution": {"0": 0, "1": 0, "2": 0},
@@ -536,10 +475,9 @@ class TraceGraphPostProcessor:
         processed_count = 0
         enhanced_count = 0
         
-        # 如果使用动态阈值，先处理部分文件收集数据
         if self.use_dynamic_thresholds and total_files > 5:
             sample_count = min(5, total_files // 3)
-            self.logger.info(f"动态阈值模式：先处理 {sample_count} 个样本文件...")
+            self.logger.info(f"动态阈值模式：处理 {sample_count} 个样本文件")
             
             for i, csv_file in enumerate(sorted(csv_files)[:sample_count]):
                 csv_path = os.path.join(csv_dir, csv_file)
@@ -547,14 +485,12 @@ class TraceGraphPostProcessor:
                 if spans_data:
                     self.analyze_batch_data(spans_data, mapping_data)
             
-            # 计算动态阈值
             if self.analysis_stats["latency_values"] and self.analysis_stats["complexity_values"]:
                 self.calculate_dynamic_thresholds(
                     self.analysis_stats["latency_values"],
                     self.analysis_stats["complexity_values"]
                 )
             
-            # 重置统计以重新开始
             self.analysis_stats = {
                 "total_traces": 0,
                 "latency_distribution": {"0": 0, "1": 0, "2": 0},
@@ -563,12 +499,10 @@ class TraceGraphPostProcessor:
                 "complexity_values": []
             }
         
-        # 处理所有文件
         for csv_file in sorted(csv_files):
             csv_path = os.path.join(csv_dir, csv_file)
             if self.process_single_csv_file(csv_path, mapping_data):
                 processed_count += 1
-                # 估算处理的span数量
                 try:
                     import pandas as pd
                     df = pd.read_csv(csv_path)
@@ -577,14 +511,12 @@ class TraceGraphPostProcessor:
                     pass
             
             if processed_count % 10 == 0:
-                self.logger.info(f"已处理 {processed_count}/{total_files} 个文件")
+                self.logger.info(f"处理进度: {processed_count}/{total_files}")
         
-        # 输出详细统计信息
         self._print_analysis_stats(date_dir)
         
-        self.logger.info(f"完成处理: {processed_count}/{total_files} 个文件")
-        self.logger.info(f"增强了约 {enhanced_count} 条span记录")
-        self.logger.info(f"原CSV文件已更新为14列格式")
+        self.logger.info(f"处理完成: {processed_count}/{total_files} 个文件")
+        self.logger.info(f"增强记录数: {enhanced_count}")
         return processed_count > 0
 
     def process_specific_csv_file(self, csv_file_path: str) -> bool:
@@ -593,46 +525,89 @@ class TraceGraphPostProcessor:
             self.logger.error(f"CSV文件不存在: {csv_file_path}")
             return False
         
-        # 获取日期目录以加载映射数据
-        date_dir = os.path.dirname(os.path.dirname(csv_file_path))  # 从csv/文件夹上两级
+        date_dir = os.path.dirname(os.path.dirname(csv_file_path))
         mapping_data = self.load_mapping_data(date_dir)
         
         return self.process_single_csv_file(csv_file_path, mapping_data)
 
-    def _create_processing_flags(self, date_dir: str):
-        """移除全局标志创建，改为按文件创建"""
-        # 这个方法现在不需要了，因为我们按文件创建标志
-        pass
+    def run_post_processing(self, specific_date: str = None) -> bool:
+        """运行后处理流程"""
+        if specific_date:
+            date_dir = os.path.join(self.data_dir, specific_date)
+            if not os.path.exists(date_dir):
+                self.logger.error(f"日期目录不存在: {date_dir}")
+                return False
+            
+            self.logger.info(f"处理日期: {specific_date}")
+            return self.process_date_directory(date_dir)
+        else:
+            if not os.path.exists(self.data_dir):
+                self.logger.error(f"数据目录不存在: {self.data_dir}")
+                return False
+            
+            date_dirs = [d for d in os.listdir(self.data_dir) 
+                        if os.path.isdir(os.path.join(self.data_dir, d)) and 
+                        len(d) == 10 and d.count('-') == 2]  # YYYY-MM-DD格式
+            
+            if not date_dirs:
+                self.logger.warning(f"未找到日期目录: {self.data_dir}")
+                return False
+            
+            self.logger.info(f"发现 {len(date_dirs)} 个日期目录")
+            
+            success_count = 0
+            for date_str in sorted(date_dirs):
+                date_dir = os.path.join(self.data_dir, date_str)
+                self.logger.info(f"处理日期: {date_str}")
+                if self.process_date_directory(date_dir):
+                    success_count += 1
+            
+            self.logger.info(f"处理完成: {success_count}/{len(date_dirs)} 个日期")
+            return success_count > 0
 
-    # ...existing code...
+    def _print_analysis_stats(self, date_dir: str):
+        """打印分析统计信息"""
+        stats = self.analysis_stats
+        
+        if stats["total_traces"] == 0:
+            self.logger.warning("未分析到任何trace数据")
+            return
+        
+        self.logger.info("=" * 50)
+        self.logger.info("图分析完成 - 统计结果")
+        self.logger.info("=" * 50)
+        self.logger.info(f"分析的trace总数: {stats['total_traces']}")
+        
+        latency_dist = stats["latency_distribution"]
+        total_latency = sum(latency_dist.values())
+        if total_latency > 0:
+            self.logger.info("延迟标签分布:")
+            self.logger.info(f"  正常延迟 (0): {latency_dist['0']} ({latency_dist['0']/total_latency*100:.1f}%)")
+            self.logger.info(f"  中等延迟 (1): {latency_dist['1']} ({latency_dist['1']/total_latency*100:.1f}%)")
+            self.logger.info(f"  高延迟 (2): {latency_dist['2']} ({latency_dist['2']/total_latency*100:.1f}%)")
+        
+        structure_dist = stats["structure_distribution"]
+        total_structure = sum(structure_dist.values())
+        if total_structure > 0:
+            self.logger.info("结构标签分布:")
+            self.logger.info(f"  简单结构 (0): {structure_dist['0']} ({structure_dist['0']/total_structure*100:.1f}%)")
+            self.logger.info(f"  中等复杂 (1): {structure_dist['1']} ({structure_dist['1']/total_structure*100:.1f}%)")
+            self.logger.info(f"  复杂结构 (2): {structure_dist['2']} ({structure_dist['2']/total_structure*100:.1f}%)")
+        
+        self.logger.info("=" * 50)
 
 def main():
     import argparse
     
-    parser = argparse.ArgumentParser(
-        description="Train Ticket 调用链图后处理器 - 直接增强原CSV为14列",
-        epilog="""
-使用示例:
-  python graph_post_processor.py                     # 处理所有日期（动态阈值）
-  python graph_post_processor.py --date 2025-06-18  # 处理特定日期
-  python graph_post_processor.py --file trace/2025-06-18/csv/14_30.csv  # 处理特定文件
-  python graph_post_processor.py --static-thresholds # 使用静态阈值
-        """,
-        formatter_class=argparse.RawDescriptionHelpFormatter
-    )
-    parser.add_argument("--date", type=str, 
-                       help="处理特定日期 (YYYY-MM-DD)")
-    parser.add_argument("--file", type=str,
-                       help="处理特定CSV文件")
-    parser.add_argument("--data-dir", type=str, default="trace",
-                       help="数据目录路径，默认: trace")
-    parser.add_argument("--static-thresholds", action="store_true",
-                       help="使用静态阈值而不是动态阈值")
+    parser = argparse.ArgumentParser(description="Train Ticket 调用链图后处理器")
+    parser.add_argument("--date", type=str, help="处理特定日期")
+    parser.add_argument("--file", type=str, help="处理特定CSV文件")
+    parser.add_argument("--data-dir", type=str, default="trace", help="数据目录路径，默认: trace")
+    parser.add_argument("--static-thresholds", action="store_true", help="使用静态阈值而不是动态阈值")
     
     args = parser.parse_args()
     
     try:
-        # 检查依赖
         import networkx
         import pandas
         import numpy
@@ -649,14 +624,12 @@ def main():
     
     try:
         if args.file:
-            # 处理特定文件
             success = processor.process_specific_csv_file(args.file)
         else:
-            # 处理日期或所有数据
             success = processor.run_post_processing(specific_date=args.date)
         return 0 if success else 1
     except KeyboardInterrupt:
-        print("后处理已中断")
+        print("后处理中断")
         return 0
     except Exception as e:
         print(f"后处理失败: {e}")
