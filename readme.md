@@ -8,29 +8,32 @@ Train Ticket 系统Trace采集与异常检测工具，用于微服务异常检�
 TraceTicket/
 ├── train-ticket-trace-collect/       # 数据采集与标签生成
 │   ├── trace_collector.py            # 链路数据采集
-│   ├── trace_label_processor.py      # 异常标签生成
-│   ├── metrics_collector.py          # 系统指标采集
-│   └── config.py                     # 采集配置
-├── train-ticket-auto-query/          # 压测流量生成
-│   ├── config.py                     # 压测配置
-│   ├── queries.py                    # 核心查询类
-│   ├── atomic_queries.py             # 原子操作
-│   ├── scenarios.py                  # 业务场景
-│   ├── normal_request_manager.py     # 请求管理
-│   ├── run.py                        # 压测启动
-│   └── query_*.py                    # 业务查询模块
-├── fault_injection_records/          # 故障注入记录
-│   └── fault_records_YYYYMMDD.json   # 按日期存储
-├── main_controller.py                # 主控制器
-├── trace/                            # 链路数据输出
+│   ├── trace_label_processor.py        # 异常标签生成
+│   ├── metrics_collector.py            # 系统指标采集
+│   └── config.py                       # 采集配置
+├── train-ticket-auto-query/            # 压测流量生成
+│   ├── config.py                       # 压测配置
+│   ├── queries.py                      # 核心查询类
+│   ├── atomic_queries.py               # 原子操作
+│   ├── scenarios.py                    # 业务场景
+│   ├── normal_request_manager.py       # 请求管理
+│   ├── run.py                          # 压测启动
+│   └── query_*.py                      # 业务查询模块
+├── train-ticket-chaos-mesh/            # 故障注入模块
+│   ├── chaos_injection_master.sh       # 主故障注入脚本
+│   ├── chaos_launch.py                 # 远程执行控制器
+│   └── fault_injection_records         # 故障注入执行记录
+│       └── fault_records_YYYYMMDD.json # 按日期存储
+├── main_controller.py                  # 主控制器
+├── trace/                              # 链路数据输出
 │   └── YYYY-MM-DD/
 │       └── csv/
-│           ├── HH_MM.csv             # 分钟级数据
-│           └── HH_MM.label_processed # 处理标志
-└── metrics/                          # 指标数据输出
+│           ├── HH_MM.csv               # 分钟级数据
+│           └── HH_MM.label_processed   # 处理标志
+└── metrics/                            # 指标数据输出
     └── YYYY-MM-DD/
         └── csv/
-            └── HH_MM.csv             # 分钟级指标
+            └── HH_MM.csv               # 分钟级指标
 ```
 
 ## 功能特性
