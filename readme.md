@@ -82,7 +82,7 @@ traceIdHigh,traceIdLow,parentSpanId,spanId,startTime,duration,nanosecond,DBhash,
 
 **压测强度**：编辑 `train-ticket-auto-query/config.py` 中的 `DEFAULT_PRESSURE_LEVEL` 和 `PRESSURE_TEST_PRESETS`
 
-**指标采集间隔**：修改 `metrics_collector.py` 中的默认间隔（当前15秒）或启动时指定 `--interval` 参数
+**指标采集间隔**：修改 `main_controller.py` 中 `start_metrics_collection()` 方法的 `--interval` 参数（当前1秒）
 
 **异常检测阈值**：修改 `main_controller.py` 中的 `detection_threshold`（当前0.15）
 

@@ -65,7 +65,8 @@ class TrainTicketAnomalyDetectionController:
         return {
             "real_time_mode": {
                 "enabled": True,
-                "check_interval_seconds": 30,
+                "check_interval_seconds": 1,  # 检查新文件的间隔，改为1秒
+                "status_display_interval_seconds": 30,  # 状态显示间隔，保持30秒
                 "auto_process_delay_seconds": 65,
                 "detection_threshold": 0.15,
                 "warmup_minutes": 3
@@ -243,7 +244,8 @@ class TrainTicketAnomalyDetectionController:
         try:
             cmd = [
                 sys.executable, str(metrics_script),
-                "--duration", str(duration_minutes)
+                "--duration", str(duration_minutes),
+                "--interval", "1"  # 添加1秒间隔参数
             ]
             
             process = self._run_subprocess(cmd, "metrics_collection", background=True)
@@ -285,9 +287,12 @@ class TrainTicketAnomalyDetectionController:
                 # 构造文件对应的时间
                 file_time = current_time.replace(hour=int(hour), minute=int(minute), second=0, microsecond=0)
                 
-                # 如果文件时间早于脚本启动时间，跳过历史数据
-                if file_time < self.script_start_time:
-                    self.logger.debug(f"跳过历史数据文件: {filename} (文件时间: {file_time.strftime('%H:%M')}, 启动时间: {self.script_start_time.strftime('%H:%M')})")
+                # 修改时间过滤逻辑：只跳过早于启动分钟的文件
+                # 将启动时间向下取整到分钟级别，包含启动当分钟的文件
+                script_start_minute = self.script_start_time.replace(second=0, microsecond=0)
+                
+                if file_time < script_start_minute:
+                    self.logger.debug(f"跳过历史数据文件: {filename} (文件时间: {file_time.strftime('%H:%M')}, 启动分钟: {script_start_minute.strftime('%H:%M')})")
                     continue
                 
                 # 检查文件是否已经"成熟"（超过65秒）
@@ -333,6 +338,7 @@ class TrainTicketAnomalyDetectionController:
         self.logger.info("系统配置:")
         self.logger.info(f"  - 检测阈值: {self.config['real_time_mode']['detection_threshold']}")
         self.logger.info(f"  - 检查间隔: {self.config['real_time_mode']['check_interval_seconds']} 秒")
+        self.logger.info(f"  - 状态显示间隔: {self.config['real_time_mode']['status_display_interval_seconds']} 秒")
         self.logger.info(f"脚本启动时间: {self.script_start_time.strftime('%Y-%m-%d %H:%M:%S')}")
         
         self.monitoring_active = True
@@ -359,12 +365,16 @@ class TrainTicketAnomalyDetectionController:
         
         # 启动监控循环
         check_interval = self.config["real_time_mode"]["check_interval_seconds"]
-        self.logger.info(f"开始实时监控 (检查间隔: {check_interval}s)")
+        status_display_interval = self.config["real_time_mode"]["status_display_interval_seconds"]
+        self.logger.info(f"开始实时监控 (检查间隔: {check_interval}s, 状态显示间隔: {status_display_interval}s)")
         
         start_time = time.time()
+        last_status_display = 0  # 记录上次状态显示时间
+        
         try:
             while self.monitoring_active:
-                elapsed_minutes = (time.time() - start_time) / 60
+                current_time = time.time()
+                elapsed_minutes = (current_time - start_time) / 60
                 
                 # 检查新数据
                 new_files = self.check_for_new_data()
@@ -372,67 +382,69 @@ class TrainTicketAnomalyDetectionController:
                 if new_files:
                     self.process_new_files_real_time(new_files)
                 
-                # 显示运行状态
-                elapsed_hours = elapsed_minutes / 60
-                detection_count = len(self.results["real_time_detections"])
-                anomaly_count = len([d for d in self.results["real_time_detections"] if d["result"].get("anomaly_detected", False)])
-                
-                # 计算验证统计
-                all_detections = self.results["real_time_detections"]
-                validated_detections = [d for d in all_detections if d["validation"].get("validation") == "completed"]
-                
-                accuracy_stats = {"true_positive": 0, "true_negative": 0, "false_positive": 0, "false_negative": 0}
-                for detection in validated_detections:
-                    accuracy = detection["validation"].get("accuracy", "unknown")
-                    if accuracy in accuracy_stats:
-                        accuracy_stats[accuracy] += 1
-                
-                # 准确率计算
-                total_verified = sum(accuracy_stats.values())
-                if total_verified > 0:
-                    accuracy_rate = ((accuracy_stats["true_positive"] + accuracy_stats["true_negative"]) / total_verified) * 100
-                    accuracy_info = f"{accuracy_rate:.1f}%"
-                else:
-                    accuracy_info = "待验证"
-                
-                # 组件状态和压测统计
-                components_status = []
-                
-                if load_test_process and load_test_process.poll() is None:
-                    # 压测运行中，显示统计信息
-                    total_req = self.load_test_stats["total_requests"]
-                    success_req = self.load_test_stats["successful_requests"]
-                    if total_req > 0:
-                        success_rate = (success_req / total_req) * 100
-                        components_status.append(f"压测:运行({success_req}/{total_req}, {success_rate:.1f}%)")
-                    else:
-                        components_status.append("压测:运行(统计中...)")
-                else:
-                    components_status.append("压测:失败")
+                # 只在达到状态显示间隔时才显示状态
+                if current_time - last_status_display >= status_display_interval:
+                    elapsed_hours = elapsed_minutes / 60
+                    detection_count = len(self.results["real_time_detections"])
+                    anomaly_count = len([d for d in self.results["real_time_detections"] if d["result"].get("anomaly_detected", False)])
                     
-                if collection_process and collection_process.poll() is None:
-                    components_status.append("采集:运行")
-                else:
-                    components_status.append("采集:失败")
+                    # 计算验证统计
+                    all_detections = self.results["real_time_detections"]
+                    validated_detections = [d for d in all_detections if d["validation"].get("validation") == "completed"]
+                    
+                    accuracy_stats = {"true_positive": 0, "true_negative": 0, "false_positive": 0, "false_negative": 0}
+                    for detection in validated_detections:
+                        accuracy = detection["validation"].get("accuracy", "unknown")
+                        if accuracy in accuracy_stats:
+                            accuracy_stats[accuracy] += 1
+                    
+                    # 准确率计算
+                    total_verified = sum(accuracy_stats.values())
+                    if total_verified > 0:
+                        accuracy_rate = ((accuracy_stats["true_positive"] + accuracy_stats["true_negative"]) / total_verified) * 100
+                        accuracy_info = f"{accuracy_rate:.1f}%"
+                    else:
+                        accuracy_info = "待验证"
+                    
+                    # 组件状态和压测统计
+                    components_status = []
+                    
+                    if load_test_process and load_test_process.poll() is None:
+                        # 压测运行中，显示统计信息
+                        total_req = self.load_test_stats["total_requests"]
+                        success_req = self.load_test_stats["successful_requests"]
+                        if total_req > 0:
+                            success_rate = (success_req / total_req) * 100
+                            components_status.append(f"压测:运行({success_req}/{total_req}, {success_rate:.1f}%)")
+                        else:
+                            components_status.append("压测:运行(统计中...)")
+                    else:
+                        components_status.append("压测:失败")
+                        
+                    if collection_process and collection_process.poll() is None:
+                        components_status.append("采集:运行")
+                    else:
+                        components_status.append("采集:失败")
                 
-                if metrics_process and metrics_process.poll() is None:
-                    components_status.append("指标:运行")
-                else:
-                    components_status.append("指标:失败")
+                    if metrics_process and metrics_process.poll() is None:
+                        components_status.append("指标:运行")
+                    else:
+                        components_status.append("指标:失败")
+                    
+                    # 构建监控状态信息
+                    status_info = [
+                        f"运行时间: {elapsed_hours:.1f}h",
+                        f"检测次数: {detection_count}",
+                        f"异常次数: {anomaly_count}",
+                        f"准确率: {accuracy_info}",
+                        f"验证: {len(validated_detections)}/{detection_count}",
+                        " | ".join(components_status)
+                    ]
+                    
+                    self.logger.info(f"监控状态: {' | '.join(status_info)}")
+                    last_status_display = current_time
                 
-                # 构建监控状态信息
-                status_info = [
-                    f"运行时间: {elapsed_hours:.1f}h",
-                    f"检测次数: {detection_count}",
-                    f"异常次数: {anomaly_count}",
-                    f"准确率: {accuracy_info}",
-                    f"验证: {len(validated_detections)}/{detection_count}",
-                    " | ".join(components_status)
-                ]
-                
-                self.logger.info(f"监控状态: {' | '.join(status_info)}")
-                
-                # 等待下次检查
+                # 等待下次检查（短间隔）
                 time.sleep(check_interval)
         
         except KeyboardInterrupt:

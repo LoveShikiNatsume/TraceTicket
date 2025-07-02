@@ -299,7 +299,7 @@ class PrometheusMetricsCollector:
         """开始指标采集"""
         # 修改默认采集间隔为更高频率
         if interval_seconds is None:
-            interval_seconds = 15  # 默认15秒采集一次，而不是60秒
+            interval_seconds = 1
             
         self.logger.info("开始系统指标采集")
         

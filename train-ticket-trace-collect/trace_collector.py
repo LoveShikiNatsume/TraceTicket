@@ -189,6 +189,28 @@ class AnomalyDetectionTraceCollector:
             self.service_counter += 1
         return self.service_encoder[service_name]
 
+    def _safe_int_from_hex(self, hex_str: str, default: int = 0) -> int:
+        """安全地将十六进制字符串转换为整数"""
+        try:
+            if not hex_str:
+                return default
+            return int(hex_str, 16)
+        except (ValueError, TypeError):
+            return default
+
+    def _extract_tags(self, tags_list: List[Dict]) -> Dict[str, str]:
+        """从span的tags列表中提取标签字典"""
+        tags_dict = {}
+        try:
+            for tag in tags_list:
+                key = tag.get("key", "")
+                value = tag.get("value", "")
+                if key and isinstance(value, (str, int, float, bool)):
+                    tags_dict[key] = str(value)
+        except Exception as e:
+            self.logger.debug(f"提取标签失败: {e}")
+        return tags_dict
+
     def _extract_parent_span_id(self, span: Dict) -> str:
         """从 references 字段中提取父 span ID"""
         references = span.get("references", [])
@@ -335,6 +357,8 @@ class AnomalyDetectionTraceCollector:
                     parsed_spans.append(span_data)
                     
                 except Exception as e:
+                    print(f"处理span失败: {e}")
+                    print(f"span数据: {span}")
                     continue
         
         self.stats["total_spans"] += len(parsed_spans)
