@@ -6,8 +6,8 @@ Train Ticket 系统Trace采集与异常检测工具，用于微服务异常检�
 
 ```
 TraceTicket/
-├── train-ticket-trace-collect/       # 数据采集与标签生成
-│   ├── trace_collector.py            # 链路数据采集
+├── train-ticket-trace-collect/         # 数据采集与标签生成
+│   ├── trace_collector.py              # 链路数据采集
 │   ├── trace_label_processor.py        # 异常标签生成
 │   ├── metrics_collector.py            # 系统指标采集
 │   └── config.py                       # 采集配置
