@@ -17,6 +17,7 @@ import threading
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 from pathlib import Path
+import requests  # 添加这行
 
 # 添加子目录到路径
 sys.path.append(str(Path(__file__).parent / "train-ticket-trace-collect"))
@@ -790,13 +791,29 @@ class TrainTicketAnomalyDetectionController:
 
 def main():
     """主函数 - 一键启动"""
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="Train Ticket 异常检测系统")
+    parser.add_argument("--mode", choices=["monitor", "analyze"], default="monitor",
+                       help="运行模式: monitor=实时监控, analyze=分析JSON结果")
+    parser.add_argument("--date", type=str, help="指定分析日期 (YYYY-MM-DD)")
+    
+    args = parser.parse_args()
+    
     print("=" * 60)
     print("Train Ticket Anomaly Detection System")
     print("=" * 60)
     
     try:
         controller = TrainTicketAnomalyDetectionController()
-        controller.run_real_time_monitoring()
+        
+        if args.mode == "monitor":
+            # 原有的实时监控模式
+            controller.run_real_time_monitoring()
+        elif args.mode == "analyze":
+            # 新的JSON分析模式
+            controller.run_json_analysis_mode()
+        
         return 0
         
     except KeyboardInterrupt:
