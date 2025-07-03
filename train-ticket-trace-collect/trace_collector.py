@@ -5,7 +5,7 @@ Train Ticket Trace Collector for Anomaly Detection
 
 Author: LoveShikiNatsume
 Date: 2025-06-18
-Version: 2.0 - 支持跨日期运行
+Version: 2.2 输出11列基础数据，移除标签计算
 """
 
 import requests
@@ -21,7 +21,7 @@ from typing import List, Dict, Optional
 from config import Config
 
 class AnomalyDetectionTraceCollector:
-    """异常检测链路追踪数据采集器 - 支持跨日期运行"""
+    """异常检测链路追踪数据采集器"""
     
     def __init__(self):
         self.config = Config()
@@ -34,7 +34,6 @@ class AnomalyDetectionTraceCollector:
         self.session = requests.Session()
         self.session.timeout = self.config.REQUEST_TIMEOUT
         
-        # 编码映射字典（全局维护，跨日期保持一致）
         self.operation_encoder = {}
         self.service_encoder = {}
         self.operation_counter = 1
@@ -54,22 +53,20 @@ class AnomalyDetectionTraceCollector:
             "db_spans": 0
         }
         
-        self.logger.info(f"Train Ticket 链路追踪采集器已初始化")
+        self.logger.info("Train Ticket 链路追踪采集器初始化完成")
         self.logger.info(f"Jaeger API: {self.api_url}")
-        self.logger.info(f"基础输出目录: {self.base_output_dir}")
+        self.logger.info(f"输出目录: {self.base_output_dir}")
 
     def _get_current_date_dirs(self):
         """获取当前日期的目录路径"""
         today = datetime.now().strftime("%Y-%m-%d")
         today_dir = os.path.join(self.base_output_dir, today)
         csv_dir = os.path.join(today_dir, "csv")
-        json_dir = os.path.join(today_dir, "json")
         
         # 确保目录存在
         os.makedirs(csv_dir, exist_ok=True)
-        os.makedirs(json_dir, exist_ok=True)
         
-        return today, today_dir, csv_dir, json_dir
+        return today, today_dir, csv_dir
 
     def _setup_logging(self):
         """设置日志输出"""
@@ -95,13 +92,13 @@ class AnomalyDetectionTraceCollector:
                 data = response.json()
                 services = data.get("data", [])
                 trainticket_services = [s for s in services if "trainticket" in s]
-                self.logger.info(f"连接成功，发现 {len(trainticket_services)} 个 Train Ticket 服务")
+                self.logger.info(f"连接成功，发现 Train Ticket 服务: {len(trainticket_services)} 个")
                 return len(trainticket_services) > 0
             else:
                 self.logger.error(f"连接失败: HTTP {response.status_code}")
                 return False
         except Exception as e:
-            self.logger.error(f"连接测试错误: {e}")
+            self.logger.error(f"连接测试失败: {e}")
             return False
 
     def get_available_services(self) -> List[str]:
@@ -117,11 +114,25 @@ class AnomalyDetectionTraceCollector:
             return []
 
     def collect_traces(self, service: str = None, lookback: str = "5m", limit: int = 100) -> List[Dict]:
-        """从指定服务采集链路追踪数据"""
+        """从指定服务采集链路追踪数据 - 使用正确的时间参数"""
         try:
-            params = {"lookback": lookback, "limit": limit}
-            if service:
-                params["service"] = service
+            current_time = datetime.now()
+            
+            # 计算时间范围 - 最近5分钟
+            end_time_us = int(current_time.timestamp() * 1000000)  # 当前时间微秒
+            start_time_us = end_time_us - (5 * 60 * 1000000)  # 5分钟前的微秒
+            
+            # 使用正确的Jaeger API参数
+            params = {
+                "service": service if service else "",
+                "start": start_time_us,  # 开始时间（微秒）
+                "end": end_time_us,      # 结束时间（微秒）
+                "limit": limit
+            }
+            
+            # 移除空的service参数
+            if not service:
+                del params["service"]
             
             self.stats["total_requests"] += 1
             response = self.session.get(f"{self.api_url}/traces", params=params)
@@ -130,12 +141,34 @@ class AnomalyDetectionTraceCollector:
                 traces = response.json().get("data", [])
                 self.stats["successful_requests"] += 1
                 self.stats["total_traces"] += len(traces)
+                
+                self.logger.debug(f"查询时间范围: {current_time.strftime('%H:%M:%S')} 前5分钟")
+                self.logger.debug(f"获取trace数量: {len(traces)}")
+                
+                # 验证获取的trace确实在时间范围内
+                if traces and self.logger.level <= logging.DEBUG:
+                    trace_times = []
+                    for trace in traces[:3]:  # 只检查前3个trace
+                        for span in trace.get("spans", [])[:1]:  # 只检查第一个span
+                            span_time_us = span.get("startTime", 0)
+                            if span_time_us:
+                                span_time = datetime.fromtimestamp(span_time_us / 1000000)
+                                trace_times.append(span_time.strftime('%Y-%m-%d %H:%M:%S'))
+                    
+                    if trace_times:
+                        self.logger.debug(f"样本trace时间: {trace_times}")
+                
                 return traces
             else:
                 self.stats["failed_requests"] += 1
+                self.logger.debug(f"采集失败: HTTP {response.status_code}")
+                if response.status_code == 400:
+                    self.logger.debug(f"请求参数: {params}")
                 return []
+                
         except Exception as e:
             self.stats["failed_requests"] += 1
+            self.logger.debug(f"采集异常: {e}")
             return []
 
     def _encode_operation(self, operation_name: str) -> int:
@@ -156,8 +189,30 @@ class AnomalyDetectionTraceCollector:
             self.service_counter += 1
         return self.service_encoder[service_name]
 
+    def _safe_int_from_hex(self, hex_str: str, default: int = 0) -> int:
+        """安全地将十六进制字符串转换为整数"""
+        try:
+            if not hex_str:
+                return default
+            return int(hex_str, 16)
+        except (ValueError, TypeError):
+            return default
+
+    def _extract_tags(self, tags_list: List[Dict]) -> Dict[str, str]:
+        """从span的tags列表中提取标签字典"""
+        tags_dict = {}
+        try:
+            for tag in tags_list:
+                key = tag.get("key", "")
+                value = tag.get("value", "")
+                if key and isinstance(value, (str, int, float, bool)):
+                    tags_dict[key] = str(value)
+        except Exception as e:
+            self.logger.debug(f"提取标签失败: {e}")
+        return tags_dict
+
     def _extract_parent_span_id(self, span: Dict) -> str:
-        """从 references 字段中提取父 span ID（Istio 环境特有）"""
+        """从 references 字段中提取父 span ID"""
         references = span.get("references", [])
         
         for ref in references:
@@ -211,44 +266,8 @@ class AnomalyDetectionTraceCollector:
         
         return 0
 
-    def _calculate_node_latency_label(self, duration_ms: float) -> int:
-        """计算节点延迟标签：0=快速(<100ms), 1=中等(<1s), 2=慢速(>=1s)"""
-        if duration_ms < 100:
-            return 0
-        elif duration_ms < 1000:
-            return 1
-        else:
-            return 2
-
-    def _safe_int_from_hex(self, hex_value, default=0) -> int:
-        """安全地将十六进制字符串转换为整数"""
-        try:
-            if hex_value is None or hex_value == "":
-                return default
-            if isinstance(hex_value, (int, float)):
-                return int(hex_value)
-            hex_str = str(hex_value)
-            if hex_str.startswith('0x'):
-                return int(hex_str, 16)
-            else:
-                return int(hex_str, 16)
-        except:
-            return default
-
-    def _extract_tags(self, tag_list: List[Dict]) -> Dict[str, str]:
-        """提取 span 标签到字典"""
-        tags = {}
-        for tag in tag_list:
-            try:
-                key = str(tag.get("key", ""))
-                value = str(tag.get("value", ""))
-                tags[key] = value
-            except:
-                continue
-        return tags
-
     def parse_traces(self, traces: List[Dict]) -> List[Dict]:
-        """解析链路数据为异常检测所需格式"""
+        """解析链路数据为异常检测所需格式 - 输出11列基础数据"""
         parsed_spans = []
         
         for trace in traces:
@@ -307,12 +326,11 @@ class AnomalyDetectionTraceCollector:
                         has_error = True
                         self.stats["error_spans"] += 1
                     
-                    node_latency_label = self._calculate_node_latency_label(duration_ms)
-                    
                     db_hash = self._calculate_db_hash(span_tags)
                     if db_hash > 0:
                         self.stats["db_spans"] += 1
                     
+                    # 构建11列基础数据记录
                     span_data = {
                         "traceIdHigh": trace_id_high,
                         "traceIdLow": trace_id_low,
@@ -325,8 +343,8 @@ class AnomalyDetectionTraceCollector:
                         "status": status,
                         "operationName": operation_encoded,
                         "serviceName": service_encoded,
-                        "nodeLatencyLabel": node_latency_label,
                         
+                        # 用于调试的额外字段（不写入CSV）
                         "_original_trace_id": trace_id,
                         "_original_span_id": raw_span_id,
                         "_original_parent_span_id": raw_parent_span_id,
@@ -339,48 +357,28 @@ class AnomalyDetectionTraceCollector:
                     parsed_spans.append(span_data)
                     
                 except Exception as e:
+                    print(f"处理span失败: {e}")
+                    print(f"span数据: {span}")
                     continue
         
         self.stats["total_spans"] += len(parsed_spans)
         return parsed_spans
 
     def save_data(self, data: List[Dict], timestamp: str):
-        """保存数据到文件 - 支持跨日期"""
+        """保存数据到文件"""
         if not data:
             return
         
-        # 🔥 关键修复：每次保存时重新获取当前日期目录
-        today, today_dir, csv_dir, json_dir = self._get_current_date_dirs()
+        today, today_dir, csv_dir = self._get_current_date_dirs()
         
         time_part = timestamp.split("T")[1]
         hour_minute = time_part.split(":")[0] + "_" + time_part.split(":")[1]
         filename = hour_minute
         
-        # 保存 JSON
-        json_data = {
-            "spans": data,
-            "operation_mapping": self.operation_encoder,
-            "service_mapping": self.service_encoder,
-            "collection_info": {
-                "timestamp": timestamp,
-                "total_spans": len(data),
-                "unique_operations": len(self.operation_encoder),
-                "unique_services": len(self.service_encoder),
-                "error_spans": len([s for s in data if s.get("_has_error", False)]),
-                "spans_with_parent": len([s for s in data if s.get("parentSpanId", 0) > 0]),
-                "spans_with_db_hash": len([s for s in data if s.get("DBhash", 0) > 0])
-            }
-        }
-        
-        json_file = os.path.join(json_dir, f"{filename}.json")
-        with open(json_file, 'w', encoding='utf-8') as f:
-            json.dump(json_data, f, indent=2, ensure_ascii=False)
-        
-        # 保存 CSV
         csv_file = os.path.join(csv_dir, f"{filename}.csv")
         self._save_csv(data, csv_file)
         
-        # 保存映射表（每日更新）
+        # 保存映射表
         mapping_file = os.path.join(today_dir, f"mapping_{today.replace('-', '')}.json")
         with open(mapping_file, 'w', encoding='utf-8') as f:
             json.dump({
@@ -391,17 +389,18 @@ class AnomalyDetectionTraceCollector:
                 "last_updated": timestamp
             }, f, indent=2, ensure_ascii=False)
         
-        self.logger.info(f"已保存 {len(data)} 条 span 到 {today}/{filename}")
+        self.logger.info(f"保存数据: {len(data)} spans -> {today}/{filename}")
 
     def _save_csv(self, data: List[Dict], filepath: str):
-        """保存为异常检测专用的 CSV 格式"""
+        """保存为11列基础数据的 CSV 格式"""
         if not data:
             return
         
+        # 定义11列基础数据字段
         fieldnames = [
             "traceIdHigh", "traceIdLow", "parentSpanId", "spanId", 
             "startTime", "duration", "nanosecond", "DBhash", "status",
-            "operationName", "serviceName", "nodeLatencyLabel"
+            "operationName", "serviceName"
         ]
         
         with open(filepath, 'w', newline='', encoding='utf-8-sig') as f:
@@ -413,30 +412,30 @@ class AnomalyDetectionTraceCollector:
                 writer.writerow(row)
 
     def start_collection(self, duration_minutes: int = 60, interval_seconds: int = None) -> bool:
-        """开始链路追踪数据采集 - 支持跨日期运行"""
-        # 使用配置文件中的默认间隔
+        """开始链路追踪数据采集"""
         if interval_seconds is None:
             interval_seconds = self.config.DEFAULT_COLLECTION_INTERVAL
             
-        self.logger.info("开始 Train Ticket 链路追踪数据采集")
+        self.logger.info("开始链路追踪数据采集")
         
         if not self.test_connection():
-            self.logger.error("无法连接到 Jaeger")
+            self.logger.error("无法连接到 Jaeger，采集终止")
             return False
         
         services = self.get_available_services()
         if not services:
-            self.logger.error("未发现 Train Ticket 服务")
+            self.logger.error("未发现 Train Ticket 服务，采集终止")
             return False
         
         if duration_minutes <= 0:
-            self.logger.info("持续运行模式（duration <= 0），按 Ctrl+C 停止")
+            self.logger.info("持续运行模式 (duration <= 0)")
             end_time = float('inf')
         else:
-            self.logger.info(f"将从 {len(services)} 个服务采集数据，持续 {duration_minutes} 分钟")
+            self.logger.info(f"采集配置: {len(services)} 个服务, 持续 {duration_minutes} 分钟")
             end_time = time.time() + (duration_minutes * 60)
         
-        self.logger.info(f"采集间隔: {interval_seconds} 秒 ({'分钟级采集' if interval_seconds == 60 else '自定义间隔'})")
+        self.logger.info(f"采集间隔: {interval_seconds} 秒")
+        self.logger.info("使用时间范围参数精确查询最近5分钟的trace")
         
         self.stats["start_time"] = datetime.now().isoformat()
         start_time = time.time()
@@ -448,43 +447,51 @@ class AnomalyDetectionTraceCollector:
                 batch_start = time.time()
                 current_date = datetime.now().strftime("%Y-%m-%d")
                 
-                # 检测日期变化
                 if last_date and last_date != current_date:
-                    self.logger.info(f"🗓️ 日期变更: {last_date} -> {current_date}")
-                    self.logger.info(f"新的数据将保存到 {current_date} 文件夹")
+                    self.logger.info(f"日期变更: {last_date} -> {current_date}")
                 
                 last_date = current_date
                 
-                self.logger.info(f"开始第 {batch_number} 批次采集 ({current_date})...")
+                self.logger.debug(f"批次 {batch_number} 开始 ({current_date})")
                 
                 # 采集数据
                 all_batch_data = []
                 for service in services:
-                    traces = self.collect_traces(service=service, lookback="5m", limit=50)
+                    traces = self.collect_traces(service=service, limit=50)
                     if traces:
                         parsed_data = self.parse_traces(traces)
                         all_batch_data.extend(parsed_data)
                     time.sleep(0.5)
                 
-                # 保存数据（自动处理跨日期）
+                # 保存数据
                 if all_batch_data:
                     current_time = datetime.now().isoformat()
                     self.save_data(all_batch_data, current_time)
                     self.collected_data.extend(all_batch_data)
+                    
+                    # 显示采集到的数据时间范围
+                    if all_batch_data:
+                        start_times = [span.get('startTime', '') for span in all_batch_data if span.get('startTime')]
+                        if start_times:
+                            earliest = min(start_times)
+                            latest = max(start_times)
+                            self.logger.debug(f"采集时间范围: {earliest} ~ {latest}")
+                else:
+                    self.logger.debug("本轮未采集到数据")
                 
                 # 显示进度
                 if duration_minutes > 0:
                     elapsed_minutes = (time.time() - start_time) / 60
-                    progress_info = f"进度: {elapsed_minutes:.1f}/{duration_minutes}分钟"
+                    progress_info = f"进度: {elapsed_minutes:.1f}/{duration_minutes}min"
                 else:
                     elapsed_hours = (time.time() - start_time) / 3600
-                    progress_info = f"已运行: {elapsed_hours:.1f}小时"
+                    progress_info = f"运行时间: {elapsed_hours:.1f}h"
                 
                 total_spans = self.stats["total_spans"]
                 parent_rate = (self.stats["spans_with_parent"] / max(total_spans, 1)) * 100
                 db_rate = (self.stats["db_spans"] / max(total_spans, 1)) * 100
                 
-                self.logger.info(f"{progress_info} | "
+                self.logger.info(f"采集状态: {progress_info} | "
                                f"Span总数: {total_spans} | "
                                f"父子关系: {parent_rate:.1f}% | "
                                f"DB哈希: {db_rate:.1f}%")
@@ -500,7 +507,7 @@ class AnomalyDetectionTraceCollector:
         except KeyboardInterrupt:
             self.logger.info("用户中断采集")
         except Exception as e:
-            self.logger.error(f"采集过程中发生错误: {e}")
+            self.logger.error(f"采集异常: {e}")
         finally:
             self.stats["end_time"] = datetime.now().isoformat()
             self._print_final_stats()
@@ -512,48 +519,35 @@ class AnomalyDetectionTraceCollector:
         """打印最终统计信息"""
         total_spans = len(self.collected_data)
         if total_spans == 0:
-            self.logger.warning("未采集到任何数据")
+            self.logger.warning("未采集到数据")
             return
         
         error_spans = len([s for s in self.collected_data if s.get("_has_error", False)])
         parent_spans = len([s for s in self.collected_data if s.get("parentSpanId", 0) > 0])
         db_hash_spans = len([s for s in self.collected_data if s.get("DBhash", 0) > 0])
         
-        self.logger.info("=== 采集统计信息 ===")
+        self.logger.info("=" * 50)
+        self.logger.info("采集完成 - 最终统计")
+        self.logger.info("=" * 50)
         self.logger.info(f"Span 总数: {total_spans:,}")
-        self.logger.info(f"错误 Span: {error_spans:,} ({(error_spans/total_spans)*100:.1f}%)")
-        self.logger.info(f"有父子关系的 Span: {parent_spans:,} ({(parent_spans/total_spans)*100:.1f}%)")
-        self.logger.info(f"有 DB 哈希的 Span: {db_hash_spans:,} ({(db_hash_spans/total_spans)*100:.1f}%)")
         self.logger.info(f"唯一服务数: {len(self.service_encoder)}")
         self.logger.info(f"唯一操作数: {len(self.operation_encoder)}")
+        self.logger.info("=" * 50)
 
 def main():
     import argparse
     
-    parser = argparse.ArgumentParser(
-        description="Train Ticket 链路追踪数据采集器",
-        epilog="""
-使用示例:
-  python trace_collector.py --test                    # 测试连接
-  python trace_collector.py --duration 60            # 采集1小时
-  python trace_collector.py --duration 0             # 持续运行
-  python trace_collector.py --duration 1440 --interval 60  # 采集24小时，间隔1分钟
-        """,
-        formatter_class=argparse.RawDescriptionHelpFormatter
-    )
-    parser.add_argument("--duration", type=int, default=30, 
-                       help="采集持续时间（分钟），0=持续运行，默认: 30")
-    parser.add_argument("--interval", type=int, default=None, 
-                       help=f"采集间隔（秒），默认: {Config().DEFAULT_COLLECTION_INTERVAL}")
-    parser.add_argument("--test", action="store_true", 
-                       help="仅测试连接")
+    parser = argparse.ArgumentParser(description="Train Ticket 链路追踪数据采集器")
+    parser.add_argument("--duration", type=int, default=30, help="采集持续时间（分钟），0=持续运行")
+    parser.add_argument("--interval", type=int, default=None, help=f"采集间隔（秒），默认: {Config().DEFAULT_COLLECTION_INTERVAL}")
+    parser.add_argument("--test", action="store_true", help="测试连接")
     
     args = parser.parse_args()
     
     collector = AnomalyDetectionTraceCollector()
     
     if args.test:
-        print("正在测试连接...")
+        print("测试连接中...")
         return 0 if collector.test_connection() else 1
     
     try:
@@ -563,7 +557,7 @@ def main():
         )
         return 0 if success else 1
     except KeyboardInterrupt:
-        print("采集已中断")
+        print("采集中断")
         return 0
 
 if __name__ == "__main__":
