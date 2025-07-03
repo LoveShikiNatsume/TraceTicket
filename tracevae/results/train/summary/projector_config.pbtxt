@@ -1,0 +1,15 @@
+embeddings {
+  tensor_name: "operation:03060"
+  metadata_path: "03060/operation/metadata.tsv"
+  tensor_path: "03060/operation/tensors.tsv"
+}
+embeddings {
+  tensor_name: "z:03060"
+  metadata_path: "03060/z/metadata.tsv"
+  tensor_path: "03060/z/tensors.tsv"
+}
+embeddings {
+  tensor_name: "z2:03060"
+  metadata_path: "03060/z2/metadata.tsv"
+  tensor_path: "03060/z2/tensors.tsv"
+}
