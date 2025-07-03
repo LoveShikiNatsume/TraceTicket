@@ -38,7 +38,15 @@ class TrainTicketAnomalyDetectionController:
             "load_test": "未开始",
             "data_collection": "未开始",
             "metrics_collection": "未开始",
-            "anomaly_detection": "未开始"
+            "anomaly_detection": "未开始",
+            "tracevae_service": "未开始"  # 添加服务状态
+        }
+        
+        # 压测统计
+        self.load_test_stats = {
+            "total_requests": 0,
+            "successful_requests": 0,
+            "last_update": None
         }
         
         # 压测统计
@@ -58,6 +66,10 @@ class TrainTicketAnomalyDetectionController:
         # 实时监控相关
         self.monitoring_active = False
         self.last_processed_minute = None
+        
+        # TraceVAE服务相关
+        self.tracevae_service_process = None
+        self.tracevae_service_url = os.getenv("TRACEVAE_SERVICE_URL", "http://localhost:8000")
         
         self.logger.info("Train Ticket 异常检测系统启动")
 
@@ -612,13 +624,166 @@ class TrainTicketAnomalyDetectionController:
                 "reason": f"读取CSV文件失败: {e}"
             }
 
+    # def call_anomaly_detection_model(self, csv_file: str) -> Dict:
+    #     """调用异常检测模型（当前为模拟实现）"""
+    #     self.logger.debug(f"异常检测: {os.path.basename(csv_file)}")
+        
+    #     # TODO: 这里可以替换为真实的异常检测模型调用
+    #     # 例如：result = subprocess.run([python, model_script, csv_file])
+        
+    #     script_path = self.project_root / self.config["scripts"]["anomaly_detection"]
+        
+    #     if not os.path.exists(script_path):
+    #         self.logger.debug(f"使用模拟异常检测 (真实模型路径: {script_path})")
+        
+    #     # 读取文件基本信息用于模拟
+    #     try:
+    #         import pandas as pd
+    #         df = pd.read_csv(csv_file)
+    #         trace_count = len(df['traceIdLow'].unique()) if 'traceIdLow' in df.columns else 0
+    #         span_count = len(df)
+    #     except Exception as e:
+    #         self.logger.error(f"读取CSV文件失败: {e}")
+    #         trace_count = 0
+    #         span_count = 0
+        
+    #     # 模拟异常检测结果
+    #     import random
+    #     anomaly_score = random.uniform(0.0, 1.0)
+    #     threshold = self.config["real_time_mode"]["detection_threshold"]
+    #     is_anomaly = anomaly_score > threshold
+        
+    #     result = {
+    #         "file_name": os.path.basename(csv_file),
+    #         "analysis_time": datetime.now().isoformat(),
+    #         "trace_count": trace_count, 
+    #         "span_count": span_count,
+    #         "anomaly_score": round(anomaly_score, 4),
+    #         "threshold": threshold,
+    #         "anomaly_detected": is_anomaly,
+    #         "model_confidence": round(abs(anomaly_score - threshold), 4),
+    #         "anomaly_types": []
+    #     }
+        
+    #     if is_anomaly:
+    #         possible_anomalies = ["high_latency", "error_spike", "unusual_pattern", "service_degradation"]
+    #         result["anomaly_types"] = random.sample(possible_anomalies, random.randint(1, 2))
+            
+    #     return result
+
     def call_anomaly_detection_model(self, csv_file: str) -> Dict:
-        """调用异常检测模型（当前为模拟实现）"""
+        """调用TraceVAE异常检测模型"""
         self.logger.debug(f"异常检测: {os.path.basename(csv_file)}")
         
-        # TODO: 这里可以替换为真实的异常检测模型调用
-        # 例如：result = subprocess.run([python, model_script, csv_file])
+        try:
+            # 使用TraceVAE在线检测
+            result = self._call_tracevae_online_detection(csv_file)
+            if result:
+                return result
+        except Exception as e:
+            self.logger.warning(f"TraceVAE在线检测失败，使用降级模式: {e}")
         
+        # 降级到原有的模拟检测
+        return self._fallback_simulation_detection(csv_file)
+
+    def _call_tracevae_online_detection(self, csv_file: str) -> Dict:
+        """调用TraceVAE在线检测服务"""
+        import asyncio
+        import sys
+        
+        # 添加csv_file_monitor.py所在路径（假设在同一目录或子目录）
+        monitor_path = str(self.project_root)  # 或者具体的路径
+        if monitor_path not in sys.path:
+            sys.path.append(monitor_path)
+        
+        # 导入CSV监控器
+        from csv_file_monitor import CSVFileMonitor
+        
+        # TraceVAE服务URL（可以通过环境变量配置）
+        tracevae_url = os.getenv("TRACEVAE_SERVICE_URL", "http://localhost:8000")
+        
+        # 创建监控器
+        monitor = CSVFileMonitor(tracevae_url)
+        
+        # 异步调用检测
+        async def detect():
+            return await monitor.process_entire_csv_file(csv_file, batch_size=20)
+        
+        # 运行检测
+        tracevae_result = asyncio.run(detect())
+        
+        # 转换为Train Ticket期望的格式
+        return self._convert_tracevae_to_train_ticket_format(tracevae_result, csv_file)
+
+    def _convert_tracevae_to_train_ticket_format(self, tracevae_result: Dict, csv_file: str) -> Dict:
+        """将TraceVAE结果转换为Train Ticket期望的格式"""
+        try:
+            file_name = os.path.basename(csv_file)
+            
+            # 提取TraceVAE结果
+            status = tracevae_result.get('status', 'NORMAL')
+            total_traces = tracevae_result.get('total_traces', 0)
+            anomaly_traces = tracevae_result.get('anomaly_traces', 0)
+            anomaly_percentage = tracevae_result.get('anomaly_percentage', 0.0)
+            
+            # 判断是否异常
+            is_anomaly = status == 'ANOMALY'
+            
+            # 计算异常分数 (0.0-1.0)
+            anomaly_score = anomaly_percentage / 100.0 if total_traces > 0 else 0.0
+            
+            # 获取阈值
+            threshold = self.config["real_time_mode"]["detection_threshold"]
+            
+            # 计算置信度
+            confidence = abs(anomaly_score - threshold)
+            
+            # 构建异常类型
+            anomaly_types = []
+            if is_anomaly:
+                if anomaly_percentage > 80:
+                    anomaly_types.append("high_anomaly_rate")
+                elif anomaly_percentage > 50:
+                    anomaly_types.append("moderate_anomaly_rate")
+                else:
+                    anomaly_types.append("low_anomaly_rate")
+                
+                # 添加TraceVAE特定的异常类型
+                anomaly_details = tracevae_result.get('anomaly_types', {})
+                for anomaly_type in anomaly_details.keys():
+                    anomaly_types.append(f"tracevae_{anomaly_type}")
+            
+            return {
+                "file_name": file_name,
+                "analysis_time": datetime.now().isoformat(),
+                "trace_count": total_traces,
+                "span_count": total_traces,  # 简化处理
+                "anomaly_score": round(anomaly_score, 4),
+                "threshold": threshold,
+                "anomaly_detected": is_anomaly,
+                "model_confidence": round(confidence, 4),
+                "anomaly_types": anomaly_types,
+                "detection_method": "tracevae_online",
+                "tracevae_details": {
+                    "status": status,
+                    "total_traces": total_traces,
+                    "anomaly_traces": anomaly_traces,
+                    "normal_traces": tracevae_result.get('normal_traces', 0),
+                    "anomaly_percentage": anomaly_percentage,
+                    "anomaly_types": tracevae_result.get('anomaly_types', {}),
+                    "detection_timestamp": tracevae_result.get('detection_timestamp')
+                }
+            }
+            
+        except Exception as e:
+            self.logger.error(f"TraceVAE结果转换失败: {e}")
+            raise Exception(f"结果转换失败: {e}")
+
+    def _fallback_simulation_detection(self, csv_file: str) -> Dict:
+        """降级到原有的模拟检测"""
+        self.logger.info(f"使用模拟检测: {os.path.basename(csv_file)}")
+        
+        # 这里是原来的模拟检测逻辑
         script_path = self.project_root / self.config["scripts"]["anomaly_detection"]
         
         if not os.path.exists(script_path):
@@ -650,7 +815,8 @@ class TrainTicketAnomalyDetectionController:
             "threshold": threshold,
             "anomaly_detected": is_anomaly,
             "model_confidence": round(abs(anomaly_score - threshold), 4),
-            "anomaly_types": []
+            "anomaly_types": [],
+            "detection_method": "simulation"
         }
         
         if is_anomaly:
@@ -658,6 +824,8 @@ class TrainTicketAnomalyDetectionController:
             result["anomaly_types"] = random.sample(possible_anomalies, random.randint(1, 2))
             
         return result
+
+
 
     def validate_detection_accuracy(self, expected_anomaly: bool, detected_anomaly: bool, 
                                    label_info: Dict, detection_result: Dict) -> Dict:
@@ -789,6 +957,428 @@ class TrainTicketAnomalyDetectionController:
             "validation": validation
         })
 
+    def process_detection_json_results(self, target_date: str = None):
+        """处理检测结果JSON文件并输出到控制台"""
+        target_date = target_date or datetime.now().strftime("%Y-%m-%d")
+        
+        # 查找JSON结果文件
+        project_dir = self.project_root
+        json_files = list(project_dir.glob("*.json"))
+        
+        # 过滤出检测结果文件（根据文件名模式）
+        detection_json_files = []
+        for json_file in json_files:
+            # 假设检测结果文件名格式为 时间.json (如 19_09.json)
+            if json_file.stem.count('_') == 1 and json_file.stem.replace('_', '').isdigit():
+                detection_json_files.append(json_file)
+        
+        if not detection_json_files:
+            self.logger.info("未找到检测结果JSON文件")
+            return
+        
+        # 按文件名排序
+        detection_json_files.sort()
+        
+        self.logger.info(f"找到 {len(detection_json_files)} 个检测结果文件")
+        self.logger.info("=" * 80)
+        
+        total_files = 0
+        anomaly_files = 0
+        normal_files = 0
+        
+        for json_file in detection_json_files:
+            try:
+                result_data = self.read_detection_json(json_file)
+                if result_data:
+                    self.display_detection_result(json_file.name, result_data)
+                    
+                    total_files += 1
+                    if result_data.get('status') == 'ANOMALY':
+                        anomaly_files += 1
+                    else:
+                        normal_files += 1
+                        
+            except Exception as e:
+                self.logger.error(f"处理文件 {json_file} 失败: {e}")
+        
+        # 输出汇总统计
+        self.display_summary_statistics(total_files, anomaly_files, normal_files)
+
+    def read_detection_json(self, json_file_path: Path) -> Dict:
+        """读取检测结果JSON文件"""
+        try:
+            with open(json_file_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            return data
+        except Exception as e:
+            self.logger.error(f"读取JSON文件失败 {json_file_path}: {e}")
+            return {}
+
+    def display_detection_result(self, filename: str, result_data: Dict):
+        """显示单个检测结果"""
+        status = result_data.get('status', 'UNKNOWN')
+        csv_file = result_data.get('csv_file', filename.replace('.json', '.csv'))
+        total_traces = result_data.get('total_traces', 0)
+        anomaly_traces = result_data.get('anomaly_traces', 0)
+        normal_traces = result_data.get('normal_traces', 0)
+        anomaly_percentage = result_data.get('anomaly_percentage', 0.0)
+        anomaly_threshold = result_data.get('anomaly_threshold', 0.2)
+        detection_timestamp = result_data.get('detection_timestamp', 'Unknown')
+        
+        # 状态图标和颜色
+        if status == 'ANOMALY':
+            status_icon = "🚨"
+            status_color = "异常"
+        else:
+            status_icon = "✅"
+            status_color = "正常"
+        
+        # 显示检测结果
+        print(f"\n{status_icon} 文件: {csv_file}")
+        print(f"📋 检测状态: {status_color}")
+        print(f"📊 Traces统计: 总计 {total_traces} | 正常 {normal_traces} | 异常 {anomaly_traces}")
+        print(f"📈 异常比例: {anomaly_percentage:.2f}% (阈值: {anomaly_threshold}%)")
+        print(f"🕒 检测时间: {detection_timestamp}")
+        
+        # 如果有异常，显示异常类型
+        if status == 'ANOMALY':
+            anomaly_types = result_data.get('anomaly_types', {})
+            if anomaly_types:
+                print(f"🏷️  异常类型:")
+                for anomaly_type, count in anomaly_types.items():
+                    print(f"   - {anomaly_type}: {count} 次")
+            
+            # 显示异常详情示例
+            anomaly_details = result_data.get('anomaly_details', [])
+            if anomaly_details:
+                print(f"🔍 异常示例:")
+                for i, detail in enumerate(anomaly_details[:3]):  # 只显示前3个
+                    trace_id = detail.get('traceID', 'Unknown')
+                    anomaly_type = detail.get('anomaly_type', 'Unknown')
+                    confidence = detail.get('confidence', 0)
+                    print(f"   {i+1}. {trace_id}: {anomaly_type} (置信度: {confidence:.3f})")
+        
+        print("-" * 60)
+
+    def display_summary_statistics(self, total_files: int, anomaly_files: int, normal_files: int):
+        """显示汇总统计"""
+        print("\n" + "=" * 80)
+        print("📊 检测结果汇总统计")
+        print("=" * 80)
+        print(f"📁 总文件数: {total_files}")
+        print(f"🚨 异常文件: {anomaly_files}")
+        print(f"✅ 正常文件: {normal_files}")
+        
+        if total_files > 0:
+            anomaly_rate = (anomaly_files / total_files) * 100
+            print(f"📈 异常文件比例: {anomaly_rate:.1f}%")
+        
+        print("=" * 80)
+
+    def run_json_analysis_mode(self):
+        """运行JSON分析模式"""
+        self.logger.info("启动JSON检测结果分析模式")
+        
+        try:
+            self.process_detection_json_results()
+        except Exception as e:
+            self.logger.error(f"JSON分析失败: {e}")
+
+    def check_tracevae_service(self) -> bool:
+        """检查TraceVAE在线检测服务是否运行"""
+        try:
+            response = requests.get(f"{self.tracevae_service_url}/health", timeout=5)
+            if response.status_code == 200:
+                self.logger.info("TraceVAE在线检测服务运行正常")
+                return True
+            else:
+                self.logger.warning(f"TraceVAE服务响应异常: {response.status_code}")
+                return False
+        except requests.exceptions.RequestException as e:
+            self.logger.warning(f"无法连接到TraceVAE服务: {e}")
+            return False
+
+    def start_tracevae_service(self) -> bool:
+        """启动TraceVAE在线检测服务"""
+        tracevae_dir = self.project_root / "tracevae" / "online_detector"
+        run_script = tracevae_dir / "run.py"
+        
+        if not tracevae_dir.exists():
+            self.logger.error(f"TraceVAE目录不存在: {tracevae_dir}")
+            return False
+        
+        if not run_script.exists():
+            self.logger.error(f"TraceVAE启动脚本不存在: {run_script}")
+            return False
+        
+        try:
+            self.logger.info("启动TraceVAE在线检测服务...")
+            
+            # 启动服务
+            self.tracevae_service_process = subprocess.Popen(
+                [sys.executable, "run.py"],
+                cwd=str(tracevae_dir),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                universal_newlines=True
+            )
+            
+            # 等待服务启动
+            max_wait_time = 30  # 最多等待30秒
+            wait_interval = 2   # 每2秒检查一次
+            
+            for i in range(max_wait_time // wait_interval):
+                time.sleep(wait_interval)
+                
+                # 检查进程是否还在运行
+                if self.tracevae_service_process.poll() is not None:
+                    # 进程已退出，读取错误信息
+                    _, stderr = self.tracevae_service_process.communicate()
+                    self.logger.error(f"TraceVAE服务启动失败: {stderr}")
+                    return False
+                
+                # 检查服务是否可用
+                if self.check_tracevae_service():
+                    self.logger.info("TraceVAE在线检测服务启动成功")
+                    self.component_status["tracevae_service"] = "运行中"
+                    return True
+                
+                self.logger.info(f"等待TraceVAE服务启动... ({i+1}/{max_wait_time//wait_interval})")
+            
+            # 超时未启动成功
+            self.logger.error("TraceVAE服务启动超时")
+            self.stop_tracevae_service()
+            return False
+            
+        except Exception as e:
+            self.logger.error(f"启动TraceVAE服务异常: {e}")
+            return False
+
+    def stop_tracevae_service(self):
+        """停止TraceVAE在线检测服务"""
+        if self.tracevae_service_process:
+            try:
+                self.logger.info("停止TraceVAE在线检测服务...")
+                self.tracevae_service_process.terminate()
+                self.tracevae_service_process.wait(timeout=10)
+                self.logger.info("TraceVAE服务已停止")
+            except subprocess.TimeoutExpired:
+                self.logger.warning("TraceVAE服务未响应，强制结束")
+                self.tracevae_service_process.kill()
+            except Exception as e:
+                self.logger.error(f"停止TraceVAE服务时出错: {e}")
+            finally:
+                self.tracevae_service_process = None
+                self.component_status["tracevae_service"] = "已停止"
+
+    def ensure_tracevae_service_running(self) -> bool:
+        """确保TraceVAE服务正在运行"""
+        # 检查服务是否运行
+        if self.check_tracevae_service():
+            return True
+        
+        # 服务未运行，尝试启动
+        self.logger.info("TraceVAE服务未运行，正在启动...")
+        return self.start_tracevae_service()
+
+    def _call_tracevae_online_detection(self, csv_file: str) -> Dict:
+        """调用TraceVAE在线检测服务"""
+        # 确保服务正在运行
+        if not self.ensure_tracevae_service_running():
+            raise Exception("TraceVAE在线检测服务不可用")
+        
+        import asyncio
+        import sys
+        
+        # 添加csv_file_monitor.py所在路径
+        monitor_path = str(self.project_root)
+        if monitor_path not in sys.path:
+            sys.path.append(monitor_path)
+        
+        # 导入CSV监控器
+        from csv_file_monitor import CSVFileMonitor
+        
+        # 创建监控器
+        monitor = CSVFileMonitor(self.tracevae_service_url)
+        
+        # 异步调用检测
+        async def detect():
+            return await monitor.process_entire_csv_file(csv_file, batch_size=20)
+        
+        # 运行检测
+        tracevae_result = asyncio.run(detect())
+        
+        # 转换为Train Ticket期望的格式
+        return self._convert_tracevae_to_train_ticket_format(tracevae_result, csv_file)
+
+    def run_real_time_monitoring(self):
+        """运行实时监控模式"""
+        self.logger.info("启动实时异常检测监控系统")
+        self.logger.info("系统配置:")
+        self.logger.info(f"  - 检测阈值: {self.config['real_time_mode']['detection_threshold']}")
+        self.logger.info(f"  - 检查间隔: {self.config['real_time_mode']['check_interval_seconds']} 秒")
+        self.logger.info(f"  - 状态显示间隔: {self.config['real_time_mode']['status_display_interval_seconds']} 秒")
+        self.logger.info(f"脚本启动时间: {self.script_start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+        
+        self.monitoring_active = True
+        self.results["start_time"] = datetime.now().isoformat()
+        
+        # 首先确保TraceVAE服务运行
+        self.logger.info("检查TraceVAE在线检测服务...")
+        if not self.ensure_tracevae_service_running():
+            self.logger.error("TraceVAE服务启动失败，无法进行异常检测")
+            self.monitoring_active = False
+            return
+        
+        # 启动压测
+        load_test_process = self.start_load_test()
+        if not load_test_process:
+            self.logger.warning("压测启动失败，继续监控")
+        
+        # 启动数据采集
+        collection_process = self.start_data_collection(duration_minutes=0)
+        
+        # 启动指标采集
+        metrics_process = self.start_metrics_collection(duration_minutes=0)
+        if not metrics_process:
+            self.logger.warning("指标采集启动失败，但将继续监控")
+        
+        # 检查关键组件是否成功启动
+        if not collection_process:
+            self.logger.error("数据采集启动失败，无法继续监控")
+            self.monitoring_active = False
+            return
+        
+        # 启动监控循环
+        check_interval = self.config["real_time_mode"]["check_interval_seconds"]
+        status_display_interval = self.config["real_time_mode"]["status_display_interval_seconds"]
+        self.logger.info(f"开始实时监控 (检查间隔: {check_interval}s, 状态显示间隔: {status_display_interval}s)")
+        
+        start_time = time.time()
+        last_status_display = 0
+        
+        try:
+            while self.monitoring_active:
+                current_time = time.time()
+                elapsed_minutes = (current_time - start_time) / 60
+                
+                # 检查新数据
+                new_files = self.check_for_new_data()
+                
+                if new_files:
+                    self.process_new_files_real_time(new_files)
+                
+                # 只在达到状态显示间隔时才显示状态
+                if current_time - last_status_display >= status_display_interval:
+                    elapsed_hours = elapsed_minutes / 60
+                    detection_count = len(self.results["real_time_detections"])
+                    anomaly_count = len([d for d in self.results["real_time_detections"] if d["result"].get("anomaly_detected", False)])
+                    
+                    # 计算验证统计
+                    all_detections = self.results["real_time_detections"]
+                    validated_detections = [d for d in all_detections if d["validation"].get("validation") == "completed"]
+                    
+                    accuracy_stats = {"true_positive": 0, "true_negative": 0, "false_positive": 0, "false_negative": 0}
+                    for detection in validated_detections:
+                        accuracy = detection["validation"].get("accuracy", "unknown")
+                        if accuracy in accuracy_stats:
+                            accuracy_stats[accuracy] += 1
+                    
+                    # 准确率计算
+                    total_verified = sum(accuracy_stats.values())
+                    if total_verified > 0:
+                        accuracy_rate = ((accuracy_stats["true_positive"] + accuracy_stats["true_negative"]) / total_verified) * 100
+                        accuracy_info = f"{accuracy_rate:.1f}%"
+                    else:
+                        accuracy_info = "待验证"
+                    
+                    # 组件状态和压测统计
+                    components_status = []
+                    
+                    # TraceVAE服务状态
+                    if self.check_tracevae_service():
+                        components_status.append("检测服务:运行")
+                    else:
+                        components_status.append("检测服务:异常")
+                    
+                    if load_test_process and load_test_process.poll() is None:
+                        # 压测运行中，显示统计信息
+                        total_req = self.load_test_stats["total_requests"]
+                        success_req = self.load_test_stats["successful_requests"]
+                        if total_req > 0:
+                            success_rate = (success_req / total_req) * 100
+                            components_status.append(f"压测:运行({success_req}/{total_req}, {success_rate:.1f}%)")
+                        else:
+                            components_status.append("压测:运行(统计中...)")
+                    else:
+                        components_status.append("压测:失败")
+                        
+                    if collection_process and collection_process.poll() is None:
+                        components_status.append("采集:运行")
+                    else:
+                        components_status.append("采集:失败")
+                
+                    if metrics_process and metrics_process.poll() is None:
+                        components_status.append("指标:运行")
+                    else:
+                        components_status.append("指标:失败")
+                    
+                    # 构建监控状态信息
+                    status_info = [
+                        f"运行时间: {elapsed_hours:.1f}h",
+                        f"检测次数: {detection_count}",
+                        f"异常次数: {anomaly_count}",
+                        f"准确率: {accuracy_info}",
+                        f"验证: {len(validated_detections)}/{detection_count}",
+                        " | ".join(components_status)
+                    ]
+                    
+                    self.logger.info(f"监控状态: {' | '.join(status_info)}")
+                    last_status_display = current_time
+                
+                # 等待下次检查（短间隔）
+                time.sleep(check_interval)
+        
+        except KeyboardInterrupt:
+            self.logger.info("用户中断监控")
+        except Exception as e:
+            self.logger.error(f"监控异常: {e}")
+        finally:
+            self.monitoring_active = False
+            
+            # 停止所有后台进程
+            self._cleanup_processes(load_test_process, collection_process, metrics_process)
+            
+            # 停止TraceVAE服务
+            self.stop_tracevae_service()
+            
+            self.results["end_time"] = datetime.now().isoformat()
+            
+            self.show_final_summary()
+
+    def _cleanup_processes(self, *processes):
+        """清理后台进程"""
+        process_names = ["压测", "数据采集", "指标采集"]
+        
+        for i, process in enumerate(processes):
+            if process:
+                name = process_names[i] if i < len(process_names) else f"进程{i}"
+                self.logger.info(f"停止{name}...")
+                try:
+                    process.terminate()
+                    process.wait(timeout=30)
+                    self.logger.info(f"{name}已停止")
+                except subprocess.TimeoutExpired:
+                    self.logger.warning(f"{name}未响应，强制结束")
+                    try:
+                        process.kill()
+                        self.logger.info(f"{name}已强制停止")
+                    except:
+                        self.logger.error(f"无法停止{name}")
+                except Exception as e:
+                    self.logger.error(f"停止{name}时出错: {e}")
+
+
 def main():
     """主函数 - 一键启动"""
     import argparse
@@ -825,3 +1415,4 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
+
